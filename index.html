@@ -13,12 +13,22 @@
       <img class="logo" src="logo.png" alt="Logo" />
       <h1>NanospeedGamer</h1>
       <p class="subtitle">PS4 14.00 · GoldHEN · 14.02 temporarily disabled</p>
+      <div id="crash-report" role="alert" hidden>
+        <strong>Previous run did not finish</strong>
+        <p id="crash-summary"></p>
+        <button id="ack-crash" type="button">Acknowledge previous run</button>
+      </div>
+      <div id="diagnostic-test" hidden>
+        <button id="test-storage" type="button">Test crash diagnostics</button>
+        <p id="test-result"></p>
+      </div>
       <p class="count" id="count">GoldHEN starts in 5 seconds...</p>
       <button id="start" type="button">Start GoldHEN now</button>
     </div>
 
     <script src="matrix.js"></script>
-    <script src="launch.js?v=gh1402panic3"></script>
+    <script src="breadcrumb.js?v=gh1402crumb1"></script>
+    <script src="launch.js?v=gh1402crumb1"></script>
   </body>
   <script>
   if (window.applicationCache) {
