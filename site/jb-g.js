@@ -2,6 +2,8 @@ import { establishPrimitive } from "./core.js?v=gh1402panic3";
 import { installWindowP, pairStatus } from "./mem.js?v=gh1402panic3";
 import { int64 } from "./int64.js?v=gh1402panic3";
 import { offsetsFor, PS4 } from "./ps4_offsets.js?v=gh1402panic3";
+import { ARM_KEY, RESULT_KEY, classifyProbeOutcome, makeProbeRecord } from
+  "./u2/contract.js?v=gh1402u2a";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -17,6 +19,7 @@ const params = new URLSearchParams(location.search);
    the commoner case, a stuck thread on a live page, the notice appears. */
 let lastMark = Date.now();
 let retryShown = false;
+let probeDeviceStarted = false;
 
 function showNotice(text) {
   try {
@@ -38,7 +41,11 @@ const WATCHDOG_MS = 45000;
 const watchdog = setInterval(function () {
   if (Date.now() - lastMark > WATCHDOG_MS) {
     try { clearInterval(watchdog); } catch (e) {}
-    showRetry();
+    if (PROBE_ARMED)
+      showNotice(probeDeviceStarted
+        ? "Device check stalled. Cold reboot before another exploit attempt."
+        : "Browser setup stalled. Reopen /u2/ to see the saved stage.");
+    else showRetry();
   }
 }, 5000);
 
@@ -62,16 +69,35 @@ const FROM_LANDING = (function () {
   }
 })();
 
+/* The device check is a one-shot run from /u2/. Consume its marker before
+   any primitive starts, so a restored or refreshed launch page cannot fire
+   the ROP check again without a new button press. */
+const PROBE_ARMED = (function () {
+  if (params.get("afterglow") !== "probe" || params.get("u2") !== "1")
+    return false;
+  const run = params.get("run") || "";
+  if (!/^[a-z0-9-]{8,48}$/.test(run)) return false;
+  try {
+    const r = new URL(document.referrer);
+    if (r.origin !== location.origin ||
+        !/\/u2\/(?:index\.html)?$/.test(r.pathname)) return false;
+    const armed = sessionStorage.getItem(ARM_KEY);
+    sessionStorage.removeItem(ARM_KEY);
+    return armed === run;
+  } catch (_) {
+    return false;
+  }
+})();
+
 /* A page the browser restored must do nothing at all. Until this sat here,
    the refusal came only after the WebKit stage had already run in full --
    harmless to the kernel, but pointless work on a page nobody asked to run.
    Send it back to the start page instead; from there the ordinary route
    takes over, autostart included, and it arms with a proper referrer and a
-   visible countdown. A probe is exempt: it fires nothing and patches
-   nothing. */
+   visible countdown. The probe has its own one-shot Start button. */
 const SENT_HOME = (function () {
   const want = params.get("afterglow");
-  if (!want || want === "probe" || FROM_LANDING) return false;
+  if (!want || (want === "probe" ? PROBE_ARMED : FROM_LANDING)) return false;
   try {
     /* Pin the page to the .fail look: the message lives in #msg, which is
        hidden in log mode, and the URL decides whether log mode is on. */
@@ -87,11 +113,24 @@ const SENT_HOME = (function () {
      or stepping back lands straight on it again. */
   setTimeout(function () {
     try {
-      location.replace("index.html");
+      location.replace(want === "probe" ? "u2/" : "index.html");
     } catch (e) {}
   }, 1500);
   return true;
 })();
+
+function probeCheckpoint(stage, detail, rebootRequired) {
+  if (!PROBE_ARMED) return false;
+  try {
+    const raw = JSON.stringify(makeProbeRecord(
+      params.get("run"), stage, detail, rebootRequired,
+    ));
+    localStorage.setItem(RESULT_KEY, raw);
+    return localStorage.getItem(RESULT_KEY) === raw;
+  } catch (_) {
+    return false;
+  }
+}
 
 const PROBE_MODE = params.get("probe") === "1";
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
@@ -327,6 +366,20 @@ let allDone = false,
 (async function () {
   if (SENT_HOME) return;
   let p = null;
+
+  function restoreMainFunction() {
+    if (!mainArmed) return true;
+    if (!p || !mainMf || !mainOrig) return false;
+    try {
+      p.write8(mainMf, mainOrig);
+      const actual = p.read8(mainMf);
+      const good = actual.low === mainOrig.low && actual.hi === mainOrig.hi;
+      if (good) mainArmed = false;
+      return good;
+    } catch (_) {
+      return false;
+    }
+  }
 
   const opened = [];
   let closeFd = null;
@@ -645,6 +698,10 @@ let allDone = false,
     if (retryCount() > 0)
       mark("AUTO-RELOAD-RESUME", "reload=" + retryCount() + "/" + RETRY_MAX);
 
+    if (PROBE_ARMED && !probeCheckpoint("browser", "Checking the browser primitive", false)) {
+      mark("PROBE-STOP", "Could not save the browser checkpoint");
+      return;
+    }
     state("running the primitive...", "warn");
     await new Promise((r) => setTimeout(r, 0));
 
@@ -1006,11 +1063,10 @@ let allDone = false,
     }
 
     if (params.get("afterglow")) {
-      /* Arming requires a step from the landing page. A probe
-         (afterglow=probe) fires no trigger and patches nothing, so a restored
-         page may run that. */
+      /* The ordinary kernel run is gated by the landing page. The device
+         probe is gated by /u2/ and its consumed one-shot storage marker. */
       try {
-        const ag = await import("./afterglow-g.js?v=gh1402panic3");
+        const ag = await import("./afterglow-g.js?v=gh1402u2a");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1022,8 +1078,30 @@ let allDone = false,
         };
         let agOk = false;
         if (params.get("afterglow") === "probe") {
-          ag.probeAfterglow(agCtx);
-          agOk = true;
+          if (!probeCheckpoint("rop-ready", "Native calls are ready", false))
+            throw new Error("Could not save the ROP checkpoint");
+          if (!probeCheckpoint("device-probe", "Checking device access", true))
+            throw new Error("Could not save the device checkpoint");
+          probeDeviceStarted = true;
+          let probeResult = null, probeError = null;
+          try { probeResult = ag.probeAfterglow(agCtx); }
+          catch (error) { probeError = error; }
+          const restored = restoreMainFunction();
+          const verdict = classifyProbeOutcome(probeResult, restored, probeError);
+          agOk = verdict.pass;
+          let summary = agOk
+            ? "Device prerequisites passed. Cold reboot before another exploit attempt."
+            : verdict.reasons.join("; ");
+          if (!probeCheckpoint(agOk ? "pass" : "blocked", summary,
+              verdict.rebootRequired || probeDeviceStarted)) {
+            agOk = false;
+            summary = "Could not save the final result. Cold reboot before another exploit attempt.";
+          }
+          mark(agOk ? "PROBE-PASS" : "PROBE-BLOCKED", summary);
+          state(agOk ? "Device prerequisites passed; cold reboot before another exploit attempt."
+            : "Device check blocked; see the log and cold reboot before another exploit attempt.",
+            agOk ? "ok" : "bad");
+          clearInterval(watchdog);
         } else {
           const agResult = await ag.runAfterglow(agCtx);
           agOk = !!(agResult && agResult.payload === true);
@@ -1036,15 +1114,25 @@ let allDone = false,
             null,
             "",
             params.get("afterglow") === "probe"
-              ? "index.html?afterglow=probe"
+              ? "u2/index.html"
               : "index.html?afterglow=done",
           );
         } catch (e) {}
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
+        if (PROBE_ARMED) {
+          const restored = restoreMainFunction();
+          const detail = "Device check stopped: " +
+            (agError && agError.message ? agError.message : String(agError)) +
+            (restored ? "" : "; browser function could not be restored");
+          probeCheckpoint("failed", detail, probeDeviceStarted);
+          state(detail, "bad");
+          clearInterval(watchdog);
+        }
         allDone = true;
         finishUI(false);
-        try { history.replaceState(null, "", "index.html?afterglow=failed"); } catch (e) {}
+        try { history.replaceState(null, "",
+          PROBE_ARMED ? "u2/index.html" : "index.html?afterglow=failed"); } catch (e) {}
       }
       // Stop here. Without this the host's own chain would still run
       // afterwards -- afterglow IS the kernel stage, not a prelude to one.
@@ -1055,11 +1143,23 @@ let allDone = false,
     try { if (mainArmed && mainMf && mainOrig && p) { p.write8(mainMf, mainOrig); mainArmed = false; } } catch (e) {}
     try { finishUI(false); } catch (e) {}
   } catch (eOuter) {
+    if (PROBE_ARMED) {
+      const restored = restoreMainFunction();
+      const detail = "Browser or ROP setup stopped: " +
+        ((eOuter && eOuter.message) || String(eOuter)) +
+        (restored ? "" : "; browser function could not be restored");
+      probeCheckpoint("failed", detail, probeDeviceStarted);
+      state(detail, "bad");
+    }
     try { mark("JB-THREW", (eOuter && eOuter.message) || String(eOuter)); } catch (e) {}
     try { clearInterval(watchdog); } catch (e) {}
     // Put it on the television. A failure in the WebKit stage touched
     // NOTHING -- no apm unit spent, no kernel byte written. Reopening the
     // browser is enough; rebooting the console would waste a cycle.
-    showRetry();
+    if (PROBE_ARMED)
+      showNotice(probeDeviceStarted
+        ? "Device check stopped. Cold reboot before another exploit attempt."
+        : "Browser setup stopped. Reopen /u2/ to see the saved stage.");
+    else showRetry();
   }
 })();

