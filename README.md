@@ -3,7 +3,9 @@
 Static GitHub Pages host for the supplied afterglow browser exploit. Firmware
 14.00 uses the official **GoldHEN** binary and matched patchset. Firmware 14.02
 has been disabled after the reconstructed candidate caused a hardware kernel
-panic during its first console test.
+panic during its first console test. Later local read-only checks reached
+kernel memory on two fresh boots and captured stock patch sites, but did not
+run GoldHEN.
 
 Hosted URL after Pages finishes deploying:
 
@@ -58,8 +60,9 @@ published: the earlier kernel bootstrap and the remaining payload writes still
 need complete preimage validation. Do not retry 14.02 from this host until that
 work is complete. The 14.02 table is independently corroborated by
 [ArabPixel/WebKitty commit 8e256c3](https://github.com/ArabPixel/WebKitty/commit/8e256c322b645984c56d4d90e253d4c7cf83e9e1)
-and by the supplied kernel artifact at fourteen of fifteen sites; bcopy was
-already patched in that artifact, so its original first byte remains inferred.
+and by the supplied kernel artifact at fourteen of fifteen sites. The local
+read-only capture independently confirmed bcopy's stock first byte on a fresh
+14.02 boot.
 
 The exact static 14.02 bootstrap is also recorded now; it differs from 14.00
 only at the two `sys_mmap` protection immediates (`+0x400`). It remains blocked

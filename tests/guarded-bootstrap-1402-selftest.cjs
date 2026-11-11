@@ -7,8 +7,8 @@ const guarded = require("../tools/build-guarded-bootstrap-1402.cjs");
 
 const KBASE = 0xffffffff82200000n;
 const built = guarded.build();
-assert.equal(built.size, 1408, "reviewed code size changed");
-assert.equal(built.sha256, "67a226f86afed7202c2a4b95f8fdbc01f7cab44a09365502f6db61863d7e02a1", "reviewed machine code changed");
+assert.equal(built.size, 1912, "reviewed code size changed");
+assert.equal(built.sha256, "3e9850fbee181aa12e66870d699dbdefac8cbf5b7fa9af643505f90c9bce89a9", "reviewed machine code changed");
 assert.ok(built.size <= guarded.HOST_ROOM);
 assert.equal(built.size, built.code.length);
 assert.equal(built.hex, built.code.toString("hex"));
@@ -19,7 +19,7 @@ for (const f of built.fixups) {
 }
 
 const independent = preflight.sites().filter((s) => s.group === "bootstrap");
-assert.equal(independent.length, 9);
+assert.equal(independent.length, 15);
 assert.deepEqual(guarded.SITES.map((s) => s.id), independent.map((s) => s.id));
 for (const site of guarded.SITES) {
   const other = independent.find((s) => s.id === site.id);
@@ -31,9 +31,9 @@ for (const site of guarded.SITES) {
 const checks = built.trace.filter((e) => e.type === "check");
 for (const phase of ["preflight-stock", "preflight-final", "readback-final", "readback-stock"]) {
   const rows = checks.filter((e) => e.phase === phase);
-  assert.equal(rows.length, 9, phase);
+  assert.equal(rows.length, 15, phase);
   assert.deepEqual(rows.map((e) => e.id), guarded.SITES.map((s) => s.id), phase);
-  assert.deepEqual(rows.map((e) => e.length), [8, 8, 8, 8, 8, 8, 4, 8, 4], phase);
+  assert.deepEqual(rows.map((e) => e.length), [8, 8, 8, 8, 8, 8, 8, 4, 8, 4, 8, 8, 8, 4, 4], phase);
 }
 
 const padding = built.trace.filter((e) => e.type === "padding-check");

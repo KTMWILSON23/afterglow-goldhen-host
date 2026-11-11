@@ -21,20 +21,26 @@ const STATUS = Object.freeze({
 /* Hex is in increasing memory-address order. */
 const SITES = Object.freeze([
   { id: "bootstrap-mmap-maxprot", rva: 0x490, stock: "ffffffff498b8740", final: "00000000498b8740" },
-  { id: "bootstrap-mmap-branches-a", rva: 0x4b5, stock: "720f85c9750b483b", final: "eb0085c9eb00483b" },
-  { id: "bootstrap-mmap-branches-b", rva: 0x4b9, stock: "750b483b90f00000", final: "eb00483b90f00000" },
+  { id: "bootstrap-mmap-branches-a", rva: 0x4b5, stock: "721385c9750f483b", final: "eb0085c9eb00483b" },
+  { id: "bootstrap-mmap-branches-b", rva: 0x4b9, stock: "750f483b90f00000", final: "eb00483b90f00000" },
   { id: "bootstrap-mmap-branch-c", rva: 0x4c2, stock: "7269eb0485c97463", final: "eb69eb0485c97463" },
   { id: "bootstrap-syscall-gate", rva: 0xab4, stock: "9090909090909090", final: "ff26909090909090" },
   { id: "bootstrap-mmap-prot-immediates", rva: 0x1faeda, stock: "3341b23331c04531", final: "3741b23731c04531" },
+  { id: "bootstrap-mmap-prot-immediate-second", rva: 0x1faedd, stock: "3331c04531f64531", final: "3731c04531f64531" },
   { id: "sysent11-narg", rva: 0x1102d80, stock: "00000000", final: "02000000" },
   { id: "sysent11-call", rva: 0x1102d88, dynamic: true, stockTargetRva: 0x1c07a0, finalTargetRva: 0xab4, length: 8 },
+  { id: "sysent11-byte4", rva: 0x1102d84, stock: "00000000", final: "00000000" },
+  { id: "sysent11-byte16", rva: 0x1102d90, stock: "0000000000000000", final: "0000000000000000" },
+  { id: "sysent11-byte24", rva: 0x1102d98, stock: "0000000000000000", final: "0000000000000000" },
+  { id: "sysent11-byte32", rva: 0x1102da0, stock: "0000000000000000", final: "0000000000000000" },
+  { id: "sysent11-byte40", rva: 0x1102da8, stock: "00000000", final: "00000000" },
   { id: "sysent11-thrcnt", rva: 0x1102dac, stock: "04000000", final: "01000000" },
 ].map(Object.freeze));
 
 const WRITES = Object.freeze([
   { id: "bootstrap-mmap-maxprot", rva: 0x490, width: 4, stock: "ffffffff", final: "00000000" },
-  { id: "bootstrap-mmap-branches-a", rva: 0x4b5, width: 2, stock: "720f", final: "eb00" },
-  { id: "bootstrap-mmap-branches-b", rva: 0x4b9, width: 2, stock: "750b", final: "eb00" },
+  { id: "bootstrap-mmap-branches-a", rva: 0x4b5, width: 2, stock: "7213", final: "eb00" },
+  { id: "bootstrap-mmap-branches-b", rva: 0x4b9, width: 2, stock: "750f", final: "eb00" },
   { id: "bootstrap-mmap-branch-c", rva: 0x4c2, width: 1, stock: "72", final: "eb" },
   { id: "bootstrap-syscall-gate", rva: 0xab4, width: 2, stock: "9090", final: "ff26" },
   { id: "sysent11-narg", rva: 0x1102d80, width: 4, stock: "00000000", final: "02000000" },

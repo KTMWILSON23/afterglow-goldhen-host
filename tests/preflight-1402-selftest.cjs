@@ -6,9 +6,23 @@ const path = require("node:path");
 const api = require(path.join(__dirname, "..", "site", "preflight-1402.js"));
 const kbase = { low: 0x82200000, hi: 0xffffffff };
 const specs = api.sites();
+const liveBootstrap = new Map([
+  [0x490, "ffffffff498b8740"],
+  [0x4b5, "721385c9750f483b"],
+  [0x4b9, "750f483b90f00000"],
+  [0x4c2, "7269eb0485c97463"],
+  [0xab4, "9090909090909090"],
+  [0x1faeda, "3341b23331c04531"],
+  [0x1faedd, "3331c04531f64531"],
+]);
+for (const [rva, bytes] of liveBootstrap) {
+  const site = specs.find((candidate) => candidate.rva === rva);
+  assert.ok(site, `missing live bootstrap guard at 0x${rva.toString(16)}`);
+  assert.equal(site.stock, bytes, `live bootstrap guard at 0x${rva.toString(16)}`);
+}
 
-assert.equal(specs.length, 24);
-assert.equal(specs.filter((site) => site.group === "bootstrap").length, 9);
+assert.equal(specs.length, 30);
+assert.equal(specs.filter((site) => site.group === "bootstrap").length, 15);
 assert.equal(specs.filter((site) => site.group === "patches").length, 15);
 assert.equal(Object.isFrozen(specs[0]), true);
 assert.throws(() => { specs[0].rva = 0; }, TypeError);
@@ -31,7 +45,7 @@ let result = api.evaluate(stock, { kbase });
 assert.equal(result.state, "all-stock");
 assert.equal(result.groups.bootstrap.state, "all-stock");
 assert.equal(result.groups.patches.state, "all-stock");
-assert.deepEqual(result.counts, { stock: 24, final: 0, unknown: 0 });
+assert.deepEqual(result.counts, { stock: 25, final: 0, unchanged: 5, unknown: 0 });
 assert.equal(result.safeToWrite, false);
 
 result = api.evaluate(final, { kbase });
@@ -73,7 +87,7 @@ result = api.evaluate((rva, length, site) => {
   return stock[site.id];
 }, { kbase });
 assert.equal(result.state, "all-stock");
-assert.equal(calls.length, 24);
+assert.equal(calls.length, specs.length);
 for (const [rva, length, id] of calls) {
   const site = specs.find((candidate) => candidate.id === id);
   assert.equal(rva, site.rva);

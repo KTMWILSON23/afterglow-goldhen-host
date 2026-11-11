@@ -128,9 +128,9 @@ const PATCHES_1400 = [
 
 /* Firmware 14.02 sites, with complete eight-byte windows. These are never
    relocated at runtime: every window must be either pristine or already
-   patched before write protection is touched. The bcopy first byte (0x76) is
-   inferred from its seven-byte-identical copy siblings; the supplied dump
-   already contains its accepted patched form (0xeb). */
+   patched before write protection is touched. A fresh 14.02 read-only capture
+   confirmed bcopy's stock first byte (0x76); the supplied reference already
+   contains its patched form (0xeb). */
 const PATCH_WINDOWS_1402 = [
   [0x0000acd, "76174989ea4983c2", "eb",       "bcopy"],
   [0x02bda9d, "76174989ea4983c2", "eb",       "bzero"],

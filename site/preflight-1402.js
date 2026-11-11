@@ -27,7 +27,7 @@
       id: "bootstrap-mmap-branches-a",
       group: "bootstrap",
       rva: 0x000004b5,
-      stock: "720f85c9750b483b",
+      stock: "721385c9750f483b",
       final: "eb0085c9eb00483b",
       label: "sys_mmap protection branches A",
     },
@@ -35,7 +35,7 @@
       id: "bootstrap-mmap-branches-b",
       group: "bootstrap",
       rva: 0x000004b9,
-      stock: "750b483b90f00000",
+      stock: "750f483b90f00000",
       final: "eb00483b90f00000",
       label: "sys_mmap protection branches B",
     },
@@ -64,12 +64,60 @@
       label: "sys_mmap protection immediates",
     },
     {
+      id: "bootstrap-mmap-prot-immediate-second",
+      group: "bootstrap",
+      rva: 0x001faedd,
+      stock: "3331c04531f64531",
+      final: "3731c04531f64531",
+      label: "second sys_mmap protection immediate",
+    },
+    {
       id: "sysent11-narg",
       group: "bootstrap",
       rva: 0x01102d80,
       stock: "00000000",
       final: "02000000",
       label: "sysent[11].sy_narg",
+    },
+    {
+      id: "sysent11-byte4",
+      group: "bootstrap",
+      rva: 0x01102d84,
+      stock: "00000000",
+      final: "00000000",
+      label: "sysent[11] unchanged bytes 4 to 7",
+    },
+    {
+      id: "sysent11-byte16",
+      group: "bootstrap",
+      rva: 0x01102d90,
+      stock: "0000000000000000",
+      final: "0000000000000000",
+      label: "sysent[11] unchanged bytes 16 to 23",
+    },
+    {
+      id: "sysent11-byte24",
+      group: "bootstrap",
+      rva: 0x01102d98,
+      stock: "0000000000000000",
+      final: "0000000000000000",
+      label: "sysent[11] unchanged bytes 24 to 31",
+    },
+    {
+      id: "sysent11-byte32",
+      group: "bootstrap",
+      rva: 0x01102da0,
+      stock: "0000000000000000",
+      final: "0000000000000000",
+      label: "sysent[11] unchanged bytes 32 to 39",
+    },
+    {
+      id: "sysent11-byte40",
+      group: "bootstrap",
+      rva: 0x01102da8,
+      stock: "00000000",
+      final: "00000000",
+      label: "sysent[11] unchanged bytes 40 to 43",
     },
     {
       id: "sysent11-thrcnt",
@@ -293,7 +341,12 @@
   function sites() {
     var out = [];
     for (var i = 0; i < STATIC_SITES.length; i++) out.push(cloneSite(STATIC_SITES[i]));
-    out.splice(7, 0, cloneSite(DYNAMIC_SITE));
+    var nargAt = -1;
+    for (var j = 0; j < out.length; j++) {
+      if (out[j].id === "sysent11-narg") { nargAt = j; break; }
+    }
+    if (nargAt < 0) throw new Error("missing sysent[11] narg site");
+    out.splice(nargAt + 1, 0, cloneSite(DYNAMIC_SITE));
     return out;
   }
 
@@ -307,12 +360,12 @@
   }
 
   function summarize(rows) {
-    var counts = { stock: 0, final: 0, unknown: 0 };
+    var counts = { stock: 0, final: 0, unchanged: 0, unknown: 0 };
     for (var i = 0; i < rows.length; i++) counts[rows[i].status]++;
     var state = "mixed";
     if (counts.unknown) state = "unknown";
-    else if (counts.stock === rows.length) state = "all-stock";
-    else if (counts.final === rows.length) state = "all-final";
+    else if (counts.stock + counts.unchanged === rows.length) state = "all-stock";
+    else if (counts.final + counts.unchanged === rows.length) state = "all-final";
     return { state: state, counts: counts, total: rows.length };
   }
 
@@ -338,6 +391,7 @@
       if (!stock || !final) error = error || "kernel-base-required";
       else if (!got) error = error || "missing-or-invalid-bytes";
       else if (byteLength(got) !== length) error = "wrong-length";
+      else if (got === stock && stock === final) status = "unchanged";
       else if (got === stock) status = "stock";
       else if (got === final) status = "final";
       else error = "unexpected-bytes";
