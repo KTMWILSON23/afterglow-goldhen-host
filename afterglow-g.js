@@ -98,7 +98,7 @@ const BOOTSTRAP =
   + "488991882d1001c781ac2d100101000000c681daaa1f0037c681ddaa1f00370f"
   + "20c0480d000001000f22c031c0c3";
 
-const PATCHES = [
+const PATCHES_1400 = [
   [0x0000acd, "eb",       "bcopy"],
   [0x02bd79d, "eb",       "bzero"],
   [0x02bd7e1, "eb",       "pagezero"],
@@ -114,6 +114,29 @@ const PATCHES = [
   [0x01b7ab8, "90e93c01", "dlsym, open it to every caller"],
   [0x0628684, "eb00",     "self verification"],
   [0x0628f6f, "eb00",     "delayed panic on suspend"],
+];
+
+/* Firmware 14.02 sites, with complete eight-byte windows. These are never
+   relocated at runtime: every window must be either pristine or already
+   patched before write protection is touched. The bcopy first byte (0x76) is
+   inferred from its seven-byte-identical copy siblings; the supplied dump
+   already contains its accepted patched form (0xeb). */
+const PATCH_WINDOWS_1402 = [
+  [0x0000acd, "76174989ea4983c2", "eb",       "bcopy"],
+  [0x02bda9d, "76174989ea4983c2", "eb",       "bzero"],
+  [0x02bdae1, "761b4989ea4983c2", "eb",       "pagezero"],
+  [0x02bdb5d, "76174989ea4983c2", "eb",       "memcpy"],
+  [0x02bdba1, "761b4989ea4983c2", "eb",       "pagecopy"],
+  [0x02bdd4d, "76174989ea4983c2", "eb",       "copyin"],
+  [0x02be1fd, "76174989ea4983c2", "eb",       "copyinstr"],
+  [0x02be2cd, "76174989ea4983c2", "eb",       "copystr"],
+  [0x01b7c63, "0f850b020000488b", "eb04",     "dlsym, first check"],
+  [0x01b7c73, "0f84fb010000493b", "eb04",     "dlsym, second check"],
+  [0x01b7c93, "0f8481010000bf10", "90e9",     "dlsym, nop and jump"],
+  [0x01b7724, "0f84c00000004c8d", "90e9",     "load_prx"],
+  [0x01b7cd8, "0f8239010000488b", "90e93c01", "dlsym, open it to every caller"],
+  [0x0628b04, "74074883c4085b5d", "eb00",     "self verification"],
+  [0x06293ef, "7541488d3df87403", "eb00",     "delayed panic on suspend"],
 ];
 
 /* ------------------------------------------------------------- the host */
@@ -1956,6 +1979,10 @@ async function attempt(ctx, opts) {
         + " is not enabled in this release; stopping before the kernel stage");
     return false;
   }
+  const patchWindows = ctx.firmware === "14.02" ? PATCH_WINDOWS_1402 : null;
+  const patches = patchWindows
+    ? patchWindows.map(function (p2) { return [p2[0], p2[2], p2[3]]; })
+    : PATCHES_1400.map(function (p2) { return [p2[0], p2[1], p2[2]]; });
   say("afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
 
   const missing = seedStubs();
@@ -2383,48 +2410,34 @@ async function attempt(ctx, opts) {
   };
 
 
-  /* ---- resolve patch offsets for this firmware ------------------------- */
-  {
-    const SHIFTS = [0, 16, 768, 864, 880, 992, 1024, 1152, 1200, 1280];
-    let adj = 0;
-    for (let i = 0; i < PATCHES.length; i++) {
-      const off = PATCHES[i][0];
-      const nb = unhex(PATCHES[i][1]);
-      const cur = k.read(kat(off), nb.length);
-      if (cur && sameBytes(cur, nb)) continue;
-
-      let expect1 = (nb[0] === 0xEB) ? 0x75 : -1;
-      if (nb[0] === 0x90 && nb.length > 1 && nb[1] === 0xE9) expect1 = 0x0F;
-
-      if (expect1 < 0) continue;
-      if (cur && cur[0] === expect1) continue;
-
-      let best = -1;
-      for (let s = 0; s < SHIFTS.length; s++) {
-        const t = k.read(kat(off + SHIFTS[s]), 1);
-        if (t && t[0] === expect1) { best = SHIFTS[s]; break; }
-      }
-      if (best > 0) {
-        say("[7b] " + PATCHES[i][2] + " shifted +" + best + " -> 0x" + (off + best).toString(16));
-        PATCHES[i][0] = off + best;
-        adj++;
-      } else {
-        say("[7b] " + PATCHES[i][2] + " at 0x" + off.toString(16) + " unresolved");
+  /* On 14.02, validate every complete retail window before changing any of
+     them. There is no scanning, shifting or one-byte guess. */
+  if (patchWindows) {
+    for (let i = 0; i < patchWindows.length; i++) {
+      const spec = patchWindows[i];
+      const pristine = unhex(spec[1]);
+      const replacement = unhex(spec[2]);
+      const after = new Uint8Array(pristine.length);
+      after.set(pristine); after.set(replacement);
+      const got = k.read(kat(spec[0]), pristine.length);
+      if (!got || (!sameBytes(got, pristine) && !sameBytes(got, after))) {
+        return failOut("[7b] exact 14.02 window mismatch at 0x"
+          + spec[0].toString(16) + " (" + spec[3] + ") -- no patches written");
       }
     }
-    if (adj > 0) say("[7b] adjusted " + adj + " patch offsets for this firmware");
+    say("[7b] all " + patchWindows.length + " exact 14.02 patch windows verified");
   }
 
-  if (!k.apply(kbase, PATCHES)) { return failOut("[8] the patch pass did not return"); }
+  if (!k.apply(kbase, patches)) { return failOut("[8] the patch pass did not return"); }
   let done = 0, failed = null;
-  for (let i = 0; i < PATCHES.length; i++) {
-    const bytes = unhex(PATCHES[i][1]);
-    const got = k.read(kat(PATCHES[i][0]), bytes.length);
-    if (got && sameBytes(got, bytes)) done++; else failed = failed || PATCHES[i][2];
+  for (let i = 0; i < patches.length; i++) {
+    const bytes = unhex(patches[i][1]);
+    const got = k.read(kat(patches[i][0]), bytes.length);
+    if (got && sameBytes(got, bytes)) done++; else failed = failed || patches[i][2];
   }
-  say("[8] " + done + " of " + PATCHES.length + " kernel patches in place"
+  say("[8] " + done + " of " + patches.length + " kernel patches in place"
       + (failed ? (" -- first missing: " + failed) : ""));
-  if (done < PATCHES.length) { return failOut("     refusing to go on with a half patched kernel"); }
+  if (done < patches.length) { return failOut("     refusing to go on with a half patched kernel"); }
 
   const proc = k.read_v(plus(thread, 0x08));
   const fdt = proc && k.read_v(plus(proc, 0x48));
@@ -2688,7 +2701,7 @@ async function attempt(ctx, opts) {
       + (iface.payload ? ", enabler running" : ""));
   say("========================================");
   say("  JAILBREAK COMPLETE -- FW " + (host().state && host().state.fw ? host().state.fw : "14.xx"));
-  say("  Patches: " + done + "/" + PATCHES.length);
+  say("  Patches: " + done + "/" + patches.length);
   say("  Debug Settings: check PS4 Settings");
   say("========================================");
   return iface;

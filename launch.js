@@ -30,7 +30,7 @@
     // This must be a normal navigation from index.html. jb-g.js checks the
     // same-origin referrer before it will arm the kernel stage.
     window.location.href =
-      "launch.html?v=gh1402panic1&log=1&afterglow=run&mode=goldhen";
+      "launch.html?v=gh1402panic2&log=1&afterglow=run&mode=goldhen";
   }
 
   if (params.get("afterglow") === "done") {
