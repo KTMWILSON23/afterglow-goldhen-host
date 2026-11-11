@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <title>GoldHEN 14.02 safe diagnostics</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { min-height: 100%; margin: 0; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        color: #d8fff0;
+        background: #000;
+        font: 18px/1.45 Arial, sans-serif;
+      }
+      main {
+        width: 100%;
+        max-width: 720px;
+        padding: 28px;
+        text-align: center;
+        border: 2px solid #00ff9f;
+        border-radius: 12px;
+        background: #00140d;
+      }
+      h1 { margin: 0 0 12px; color: #00ff9f; }
+      .safe {
+        margin: 18px 0;
+        padding: 12px;
+        border: 1px solid #60dfff;
+        color: #dffaff;
+        background: #002633;
+      }
+      button {
+        margin-top: 12px;
+        padding: 14px 22px;
+        border: 2px solid #00ff9f;
+        border-radius: 7px;
+        color: #00140d;
+        background: #00ff9f;
+        font-size: 18px;
+        font-weight: bold;
+      }
+      button:focus { outline: 3px solid #fff; outline-offset: 3px; }
+      #result { min-height: 3em; margin-top: 20px; font-family: monospace; }
+      .pass { color: #75ff94; }
+      .fail { color: #ff8b8b; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>GoldHEN 14.02 diagnostics</h1>
+      <p class="safe">Safe test only: this page contains no exploit, payload, or kernel access.</p>
+      <p>First we will prove that the last-stage marker survives a reload.</p>
+      <button id="run" type="button">Test crash diagnostics</button>
+      <p id="result" aria-live="polite">Ready. GoldHEN remains disabled.</p>
+    </main>
+
+    <script src="../breadcrumb.js?v=gh1402crumb1"></script>
+    <script>
+      (function () {
+        "use strict";
+
+        var api = window.AfterglowBreadcrumb;
+        var button = document.getElementById("run");
+        var result = document.getElementById("result");
+
+        function show(text, className) {
+          result.textContent = text;
+          result.className = className || "";
+        }
+
+        if (!api) {
+          button.disabled = true;
+          show("FAILED: diagnostic storage code did not load. No kernel code ran.", "fail");
+          return;
+        }
+
+        var previous = api.latest();
+        if (previous && previous.stage === "storage-test-armed" &&
+            previous.detail.indexOf("d1 safe storage test") !== -1) {
+          button.disabled = true;
+          show("PASS: the marker survived the reload. Crash diagnostics are working. GoldHEN was not run.", "pass");
+          return;
+        }
+
+        button.addEventListener("click", function () {
+          button.disabled = true;
+          var opened = api.begin("14.02", "d1 safe storage test");
+          var armed = opened && api.checkpoint(
+            "storage-test-armed",
+            "d1 safe storage test; no kernel code ran"
+          );
+          if (!armed) {
+            button.disabled = false;
+            show("FAILED: " + api.error() + ". No kernel code ran.", "fail");
+            return;
+          }
+          show("Marker saved and read back. Press OPTIONS, then Refresh Page. I am watching.", "pass");
+        });
+      })();
+    </script>
+  </body>
+</html>
