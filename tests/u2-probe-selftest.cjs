@@ -125,8 +125,12 @@ async function main() {
   assert.doesNotMatch(probe, /shot\.take|\bk\.write|\brunAfterglow\b|\bloadPayload\b|\bloadEnabler\b|sc\(S\.(ioctl|kqueue|kevent)/);
   assert.match(probe, /out\.rebootRequired = held\.length > 0/);
   assert.match(probe, /out\.pinRestored = sc\(S\.cpuset_setaffinity/);
-  assert.match(probe, /out\.optionsAccepted = accepted/);
-  assert.match(probe, /if \(accepted < TUNE\.sprays\)/);
+  assert.match(probe, /sockaddr\.u8\.set\(\[16, 2, 0x04, 0xD2, 0x0a, 0, 0, 1\]\)/);
+  assert.match(probe, /const canary = sc\(S\.socket, 2, 2, 0\)/);
+  assert.match(probe, /out\.optionFirst = "rc=" \+ rv/);
+  assert.doesNotMatch(probe, /out\.optionsAccepted|accepted < TUNE\.sprays/);
+  assert.ok(probe.indexOf("const canary =") < probe.indexOf("for (let i = 0; i < TUNE.sprays; i++)"));
+  assert.match(probe, /runPrepared\(host\(\)\.prepareMany\(\[\[stubFor\(S\.getuid\), \[\]\]\]\)\)/);
   assert.match(jb, /const verdict = classifyProbeOutcome\(probeResult, restored, probeError\)/);
   assert.match(jb, /agOk = verdict\.pass/);
   const probeBranch = jb.indexOf('if (params.get("afterglow") === "probe")');
@@ -134,8 +138,8 @@ async function main() {
   assert.doesNotMatch(jb.slice(probeBranch), /agOk = true/);
   assert.match(jb, /probeCheckpoint\("device-probe", "Checking device access", true\)/);
   assert.match(jb, /location\.replace\(want === "probe" \? "u2\/" : "index\.html"\)/);
-  assert.match(read("launch.html"), /jb-g\.js\?v=gh1402u2a/);
-  assert.match(jb, /afterglow-g\.js\?v=gh1402u2a/);
+  assert.match(read("launch.html"), /jb-g\.js\?v=gh1402u2b/);
+  assert.match(jb, /afterglow-g\.js\?v=gh1402u2b/);
   assert.match(jb, /if \(PROBE_ARMED\)[\s\S]*?else showRetry\(\)/);
   assert.match(jb, /Device check stalled\. Cold reboot before another exploit attempt/);
   assert.match(jb, /if \(SHOW_LOG \|\| !document\.body\) return/);

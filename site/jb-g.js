@@ -1066,7 +1066,7 @@ let allDone = false,
       /* The ordinary kernel run is gated by the landing page. The device
          probe is gated by /u2/ and its consumed one-shot storage marker. */
       try {
-        const ag = await import("./afterglow-g.js?v=gh1402u2a");
+        const ag = await import("./afterglow-g.js?v=gh1402u2b");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1090,7 +1090,10 @@ let allDone = false,
           const verdict = classifyProbeOutcome(probeResult, restored, probeError);
           agOk = verdict.pass;
           let summary = agOk
-            ? "Device prerequisites passed. Cold reboot before another exploit attempt."
+            ? "Device access passed; first socket option " +
+              (probeResult.optionFirst || "unavailable") +
+              "; batch last " + (probeResult.batchLastReturns || "unmeasured") +
+              ". Allocation unverified. Cold reboot."
             : verdict.reasons.join("; ");
           if (!probeCheckpoint(agOk ? "pass" : "blocked", summary,
               verdict.rebootRequired || probeDeviceStarted)) {
@@ -1098,7 +1101,7 @@ let allDone = false,
             summary = "Could not save the final result. Cold reboot before another exploit attempt.";
           }
           mark(agOk ? "PROBE-PASS" : "PROBE-BLOCKED", summary);
-          state(agOk ? "Device prerequisites passed; cold reboot before another exploit attempt."
+          state(agOk ? "Device access passed; socket allocation unverified. Cold reboot before another exploit attempt."
             : "Device check blocked; see the log and cold reboot before another exploit attempt.",
             agOk ? "ok" : "bad");
           clearInterval(watchdog);
