@@ -956,6 +956,10 @@ function readFromUSB(filename) {
 
 async function loadEnabler(url, k, kbase, room) {
   const firmware = host().firmware || "unknown";
+  if (firmware === "14.02") {
+    say("[e] GoldHEN 14.02 disabled after hardware kernel panic -- refusing safely");
+    return false;
+  }
   if (firmware !== "14.00" && firmware !== "14.02") {
     say("[e] GoldHEN is not enabled for firmware " + firmware + " -- refusing safely");
     return false;
@@ -1943,14 +1947,16 @@ async function attempt(ctx, opts) {
   STATE.ctx = ctx;
   opts = opts || {};
   STATE.retry = false;
-  if (ctx.firmware !== "14.00" && ctx.firmware !== "14.02") {
+  if (ctx.firmware === "14.02") {
+    say("afterglow -- firmware 14.02 GoldHEN route disabled after hardware kernel panic; stopping before the kernel stage");
+    return false;
+  }
+  if (ctx.firmware !== "14.00") {
     say("afterglow -- firmware " + (ctx.firmware || "unknown")
         + " is not enabled in this release; stopping before the kernel stage");
     return false;
   }
-  say(ctx.firmware === "14.02"
-      ? "afterglow -- ps4 kernel exploit, firmware 14.02 (experimental GoldHEN core candidate)"
-      : "afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
+  say("afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
 
   const missing = seedStubs();
   if (missing.length) {
