@@ -33,15 +33,12 @@
     if (launched) return;
     var firmware = detectedFirmware() || "unknown";
     if (firmware === "14.02") {
-      if (!diagnostics) {
-        stop("Persistent diagnostics did not load. Refusing to enter the kernel stage.");
-        return;
-      }
-      var opened = diagnostics.begin(firmware, "launch requested");
-      if (!opened) {
-        stop("Persistent diagnostics failed (" + diagnostics.error() + "). Refusing to enter the kernel stage.");
-        return;
-      }
+      stop("GoldHEN 14.02 is disabled after a hardware kernel panic. Do not retry this build.");
+      return;
+    }
+    if (firmware !== "14.00") {
+      stop("Firmware " + firmware + " is not supported by this release.");
+      return;
     }
     launched = true;
     if (timer !== null) window.clearInterval(timer);
