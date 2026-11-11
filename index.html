@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en" >
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>NanospeedGamer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="matrix"></canvas>
+
+    <div class="content">
+      <img class="logo" src="logo.png" alt="Logo" />
+      <h1>NanospeedGamer</h1>
+      <p class="subtitle">PS4 Kernel Exploit · 14.00 / 14.02 · GoldHEN</p>
+      <p class="count" id="count">GoldHEN starts in 5 seconds...</p>
+      <button id="start" type="button">Start GoldHEN now</button>
+    </div>
+
+    <script src="matrix.js"></script>
+    <script src="launch.js?v=1402s"></script>
+  </body>
+  <script>
+  if (window.applicationCache) {
+    const app = window.applicationCache;
+    const count = document.getElementById("count");
+    app.addEventListener("downloading", () => {
+      if (count) count.textContent = "Guardando caché...";
+    });
+    app.addEventListener("progress", e => {
+      if (count && e.lengthComputable) {
+        count.textContent = "Guardando caché... " + Math.round(e.loaded / e.total * 100) + "%";
+      }
+    });
+    app.addEventListener("cached", () => {
+      if (count) count.textContent = "Caché listo. Iniciando...";
+    });
+    app.addEventListener("noupdate", () => {
+      if (count) count.textContent = "Caché listo. Iniciando...";
+    });
+  }
+</script>
+</html>
