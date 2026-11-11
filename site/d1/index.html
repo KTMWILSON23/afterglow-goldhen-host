@@ -48,6 +48,10 @@
       #result { min-height: 3em; margin-top: 20px; font-family: monospace; }
       .pass { color: #75ff94; }
       .fail { color: #ff8b8b; }
+      .next { margin-top: 22px; font-size: 16px; }
+      .next a { color: #8debc2; }
+      .next small { display: block; margin-top: 5px; color: #b6d9ce; }
+      .next a:focus { outline: 3px solid #fff; outline-offset: 3px; }
     </style>
   </head>
   <body>
@@ -57,6 +61,9 @@
       <p>First we will prove that the last-stage marker survives a reload.</p>
       <button id="run" type="button">Test crash diagnostics</button>
       <p id="result" aria-live="polite">Ready. GoldHEN remains disabled.</p>
+      <p class="next"><a href="../u1/">Check 14.02 browser support</a>
+        <small>Browser-only check. It may close the browser; it does not start GoldHEN.</small>
+      </p>
     </main>
 
     <script src="../breadcrumb.js?v=gh1402crumb1"></script>
