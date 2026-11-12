@@ -49,12 +49,13 @@ hardware confirmation is still required.
 
 `debug_server.py` serves only to the configured PS4 IP on a new local port,
 adds no-store headers, verifies both binary hashes, and keeps checkpoint logs
-in `../debug-captures/`. The browser uses one manual Start, a same-tab token,
-a persistent attempt lock, and no automatic WebKit or kernel retry. The host
+in `../debug-captures/`. The browser uses a manual Start and a same-tab token;
+the old process-wide and typed cold-boot locks have been removed. The host
 checks 14.02 firmware, a two-way kernel base leak, the live ELF layout, the
 unique swap gadget, exact stock bootstrap and host patch windows, and a
-bounded series of thread, process, descriptor, file and map reads before any
-kernel write. Success means only that `pthread_create` returned success;
+compact separate state and map read before any kernel write. This reduces the
+full path from 12--15 APM shots to 6 while retaining the exact rights gate and
+live writer guard. Success means only that `pthread_create` returned success;
 the HEN runtime would still need visible confirmation.
 
 Known limit: the APM UAF shots can still panic. The file descriptor array may

