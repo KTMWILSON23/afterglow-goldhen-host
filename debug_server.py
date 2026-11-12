@@ -25,7 +25,7 @@ DEBUG_HASHES = {
 }
 DEBUG_SIZE = 498720
 FILES = frozenset({
-    "index.html", "launch.html", "style.css", "launch.js", "jb-g.js",
+    "index.html", "launch.html", "done.html", "style.css", "launch.js", "jb-g.js",
     "core.js", "mem.js", "int64.js", "ps4_offsets.js", "afterglow-g.js",
     "kernel-format-1402.js", "sha256.js", "debug.bin", "debug-1402-fixed.bin",
     "hen-1402-core.bin",

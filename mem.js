@@ -910,3 +910,16 @@ export function installWindowP(c, options) {
   return prim;
 }
 
+export function releaseWindowP() {
+  carrier = null;
+  mainView = null;
+  workerBuffer = null;
+  workerView = null;
+  workerMirror = null;
+  pairVectorOffset = -1;
+  retained.length = 0;
+  try {
+    globalThis.p = undefined;
+  } catch (_) {}
+}
+

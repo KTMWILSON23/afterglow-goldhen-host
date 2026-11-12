@@ -1856,5 +1856,22 @@ async function loadPayload(url, vorab) {
 
 /* End of file */
 export async function runAfterglow(ctx, opts) {
-  return attempt(ctx, opts);
+  try {
+    return await attempt(ctx, opts);
+  } finally {
+    // The exploit is one-shot. Do not keep the WebKit primitive, native-call
+    // closures, kernel interface, or shot bookkeeping alive after it returns.
+    try {
+      if (ctx && ctx.state) ctx.state.afterglow = null;
+    } catch (_) {}
+    STATE.ctx = null;
+    STATE.units = {};
+    STATE.clones = 0;
+    STATE.base = null;
+    STATE.stubs = {};
+    STATE.batch = undefined;
+    STATE.retry = false;
+    STATE.pthread = null;
+    STATE.taperSeed = false;
+  }
 }

