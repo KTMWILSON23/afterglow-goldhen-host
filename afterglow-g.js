@@ -1179,12 +1179,6 @@ async function attempt(ctx, opts) {
     say("  no libkernel stub for syscall " + missing.join(",") + " -- stopping here");
     return false;
   }
-  STATE.pthread = resolvePthreadCreate();
-  if (!STATE.pthread) {
-    say("[p] pthread_create import failed live mapping checks; no kernel shot fired");
-    return false;
-  }
-
   const pin = pinCore();
   if (!pin.ok) {
     say("  cpu pin failed (" + pin.note + ") -- refusing to go on.");
@@ -1211,6 +1205,11 @@ async function attempt(ctx, opts) {
   const shape = findLibByShape();
   if (!shape.base || !same(shape.base, libc) || !MAPS || !MAPS.length) {
     say("  live userland map listing did not confirm libc or map order");
+    return false;
+  }
+  STATE.pthread = resolvePthreadCreate();
+  if (!STATE.pthread) {
+    say("[p] pthread_create import failed live mapping checks; no kernel shot fired");
     return false;
   }
 
