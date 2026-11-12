@@ -34,9 +34,11 @@ RUN_RE = re.compile(r"^[0-9]{8,16}-[0-9]{6,20}$")
 TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 LOG_LOCK = threading.Lock()
 ATTEMPT_LOCK = threading.Lock()
-ATTEMPT_USED_HTML = b"""<!doctype html><meta charset=utf-8><title>Attempt already used</title>
+ATTEMPT_USED_HTML = b"""<!doctype html><meta charset=utf-8><title>Retry blocked safely</title>
 <body style='background:#08152b;color:#eef;font:22px Arial;padding:10vh'>
-<h1>Attempt already used</h1><p>Fully power off the PS4. Do not retry on this boot.</p></body>"""
+<h1>Retry blocked safely</h1>
+<p>The previous attempt already ran. This page is the safety lock, not a new exploit error.</p>
+<p>Fully power off the PS4. Do not retry on this boot.</p></body>"""
 
 
 def verified_debug_bytes(name):
