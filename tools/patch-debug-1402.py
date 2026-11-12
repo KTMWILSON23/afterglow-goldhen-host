@@ -3,12 +3,14 @@
 
 This is an offline, exact-image byte patch. It corrects the SETLOGIN target
 and two embedded kernel function addresses whose 14.02 counterparts were
-verified against the decrypted kernel. It retains the FSELF/FPKG kernel hooks,
-but bypasses unsupported optional installer actions, the unported
-14.00-derived userland patch table, plugin hooks, optional ShellCore
-plugin-loader injection, and deliberate ShellUI restart. Those paths are the
-first known unsafe writes on 14.02. It does not prove the remaining HEN
-runtime on hardware.
+verified against the decrypted kernel. It also replaces two compiler-emitted
+AVX configuration copies that execute inside the syscall-11 kernel callback;
+the callback does not enter an FPU context, so those vector instructions can
+fault the calling WebProcess. It retains the FSELF/FPKG kernel hooks, but
+bypasses unsupported optional installer actions, the unported 14.00-derived
+userland patch table, plugin hooks, optional ShellCore plugin-loader injection,
+and deliberate ShellUI restart. Those paths are the first known unsafe writes
+on 14.02. It does not prove the remaining HEN runtime on hardware.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "4941b6360d9274a7cda1e14e91569a034062b8e25f2aa2710fc9a59dfc7f5e79"
+OUTPUT_SHA256 = "140bace69df37f2518d03e528c42872192abac5cc15a9df6301de96f95b47efc"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -73,6 +75,33 @@ PRESERVED_TABLE_VALUES = (
     (0x10C80, "sceSblAuthMgrVerifyHeader_addr", 0x00640930),
     # This is the full 14.02 function entry; +0x40 would be mid-function.
     (0x10C98, "sceSblPfsSetKeys_addr", 0x006276F0),
+)
+
+# GCC vectorised both copies of the 44-byte configuration structure in
+# kpayload_install_payload because the installer is built with
+# -march=btver2. These instructions run in ring 0 through syscall 11 without
+# fpu_kern_enter(), unlike the payload's explicit kernel crypto paths. Use
+# scalar copies while preserving the exact source, destination, layout and
+# firmware dispatch flags.
+KERNEL_CONFIG_COPY_IN_OFFSET = 0x3A09
+KERNEL_CONFIG_COPY_IN = bytes.fromhex(
+    "c4c17e6f4304c4c17a6f4b20458b0b664181f95203"
+    "c5fe7f45a4c5fa7f4dc0"
+)
+KERNEL_CONFIG_COPY_IN_SCALAR = bytes.fromhex(
+    "458b0b498d7304488d7da4b92c000000fcf3a4"
+    "664181f95203909090909090"
+)
+
+KERNEL_CONFIG_COPY_OUT_OFFSET = 0x4279
+KERNEL_CONFIG_COPY_OUT = bytes.fromhex(
+    "c5fe6f55a44883ec30448b8d6cffffff4d037708410fb7f9"
+    "c5fe7f1424c5fa6f5dc0c5fa7f5c241c41ffd6"
+)
+KERNEL_CONFIG_COPY_OUT_SCALAR = bytes.fromhex(
+    "4883ec30488d75a44889e7b92c000000fcf3a4"
+    "448b8d6cffffff4d037708410fb7f941ffd6"
+    "909090909090"
 )
 
 # The 14.02 source archive copied its userland process-patch RVAs from 14.00.
@@ -259,6 +288,31 @@ def verify_near_call(image: bytes | bytearray, offset: int, target: int) -> None
         )
 
 
+def verify_scalar_kernel_copy(
+    image: bytes | bytearray,
+    offset: int,
+    expected: bytes,
+    required_mnemonics: tuple[str, ...],
+) -> None:
+    actual = bytes(image[offset : offset + len(expected)])
+    if actual != expected:
+        raise ValueError(
+            f"scalar kernel copy at 0x{offset:x} differs: "
+            f"expected {expected.hex()}, got {actual.hex()}"
+        )
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    instructions = list(decoder.disasm(actual, offset))
+    if sum(instruction.size for instruction in instructions) != len(expected):
+        raise ValueError(f"scalar kernel copy at 0x{offset:x} does not decode fully")
+    mnemonics = tuple(instruction.mnemonic for instruction in instructions)
+    if mnemonics[: len(required_mnemonics)] != required_mnemonics:
+        raise ValueError(
+            f"scalar kernel copy at 0x{offset:x} decoded unexpectedly: {mnemonics!r}"
+        )
+    if any(instruction.mnemonic.startswith("v") for instruction in instructions):
+        raise ValueError(f"vector instruction remains at 0x{offset:x}")
+
+
 def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     if len(original) != INPUT_SIZE or sha256(original) != INPUT_SHA256:
         raise ValueError("input is not the exact published Akatsuki debug.bin")
@@ -278,6 +332,49 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
 
     changed = bytearray(original)
     manifest_patches: list[dict[str, object]] = []
+    scalar_kernel_copies = (
+        (
+            KERNEL_CONFIG_COPY_IN_OFFSET,
+            "replace ring-0 AVX configuration capture with scalar copy",
+            KERNEL_CONFIG_COPY_IN,
+            KERNEL_CONFIG_COPY_IN_SCALAR,
+            ("mov", "lea", "lea", "mov", "cld", "rep movsb", "cmp"),
+        ),
+        (
+            KERNEL_CONFIG_COPY_OUT_OFFSET,
+            "replace ring-0 AVX payload argument copy with scalar copy",
+            KERNEL_CONFIG_COPY_OUT,
+            KERNEL_CONFIG_COPY_OUT_SCALAR,
+            (
+                "sub", "lea", "mov", "mov", "cld", "rep movsb", "mov",
+                "add", "movzx", "call",
+            ),
+        ),
+    )
+    for offset, label, old_bytes, new_bytes, mnemonics in scalar_kernel_copies:
+        if len(old_bytes) != len(new_bytes):
+            raise ValueError(f"{label} changes the exact-image size")
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        verify_scalar_kernel_copy(changed, offset, new_bytes, mnemonics)
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "x86_64_ring0_scalar_copy",
+                "file_offset": f"0x{offset:x}",
+                "length": len(new_bytes),
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+                "copy_size": 44,
+                "reason": "avoid AVX use in syscall-11 kernel context without fpu_kern_enter",
+            }
+        )
+
     for offset, label in PATCHES:
         verify_lea(original, offset, OLD_INSTRUCTION, OLD_LEA_DISP)
         changed[offset : offset + len(OLD_INSTRUCTION)] = NEW_INSTRUCTION
@@ -555,6 +652,8 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     expected_changed = {
         0x7C6, 0x7CE, 0x7D8,
         0x18D6, 0x18D7,
+        *range(0x3A09, 0x3A28),
+        *range(0x4279, 0x42A4),
         0x468D, 0x468E,
         0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
         0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -631,8 +730,8 @@ def main() -> None:
     manifest = {
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
-            "core-HEN launch that avoids unsupported optional and "
-            "unported userland/plugin paths"
+            "core-HEN launch that removes unsafe ring-0 AVX copies and avoids "
+            "unsupported optional and unported userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
@@ -650,6 +749,8 @@ def main() -> None:
             {
                 0x7C6, 0x7CE, 0x7D8,
                 0x18D6, 0x18D7,
+                *range(0x3A09, 0x3A28),
+                *range(0x4279, 0x42A4),
                 0x468D, 0x468E,
                 0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
                 0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -674,7 +775,9 @@ def main() -> None:
             "The SETLOGIN target, sceSblACMgrGetPathId, and "
             "RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF "
             "mailbox hooks recover their context from the caller's live "
-            "registers. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. "
+            "registers. Compiler-emitted AVX configuration copies in the "
+            "syscall-11 kernel callback are replaced with exact 44-byte scalar "
+            "copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. "
             "HDD config I/O, unsupported optional installer helpers, unverified "
             "process/UI patches, plugin hooks and upload, and the "
             "ShellUI/PartyDaemon restart are skipped; hardware validation "

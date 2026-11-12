@@ -2,7 +2,7 @@
    initializes WebKit, but the landing page does not block repeat launches. */
 (function () {
   "use strict";
-  const DEST = "launch.html?v=1402hen6&log=1&afterglow=run&payload=hen-1402-core.bin&retry=0&g=drain:16&g=drainsz:0x4000";
+  const DEST = "launch.html?v=1402hen7&log=1&afterglow=run&payload=hen-1402-core.bin&retry=0&g=drain:16&g=drainsz:0x4000";
   const LOCK = "hen-1402-core-attempted";
   const TOKEN = "hen-1402-core-tab-token";
   const CANDIDATE_READY = true;

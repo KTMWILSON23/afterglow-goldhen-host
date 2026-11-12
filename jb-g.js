@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r6";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r6";
-import { int64 } from "./int64.js?v=hen1402r6";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r6";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r7";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r7";
+import { int64 } from "./int64.js?v=hen1402r7";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r7";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -1023,7 +1023,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r6");
+        const ag = await import("./afterglow-g.js?v=hen1402r7");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
