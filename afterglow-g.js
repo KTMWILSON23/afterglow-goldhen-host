@@ -1693,9 +1693,13 @@ async function attempt(ctx, opts) {
   say("[p] Attempting to start corrected HEN as a thread");
   try {
     iface.payload = await loadPayload("hen-1402-core.bin", henBytes, iface.defused);
+    iface.threadStarted = STATE.payloadThreadStarted === true;
+    iface.installed = STATE.henInstalled === true;
     if (STATE.terminalReleaseAttempted) return iface;
-    if (iface.payload) {
-      say("[p] pthread_create returned success; HEN runtime remains unconfirmed");
+    if (iface.installed) {
+      say("[p] HEN completion marker confirmed");
+    } else if (iface.threadStarted) {
+      say("[p] HEN thread started but its completion marker was not seen");
     } else {
       say("[p] corrected HEN thread did not start");
     }
@@ -1766,6 +1770,8 @@ function resolvePthreadCreate() {
 
 async function loadPayload(url, vorab, defused) {
   const c = host();
+  STATE.payloadThreadStarted = false;
+  STATE.henInstalled = false;
   let blob = vorab || null;
   if (blob === null) {
     blob = await fetchBytes(url, "p");
@@ -1829,20 +1835,57 @@ async function loadPayload(url, vorab, defused) {
   const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
   const handle = qAt(thr, 0);
   const started = rc === 0 && (handle.hi >>> 0) > 0;
-  if (started && defused === true && typeof c.releaseAfterPayloadStart === "function") {
+  STATE.payloadThreadStarted = started;
+  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + text(handle));
+  say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
+      + (started ? " -- running" : " -- did NOT start"));
+  if (!started) return false;
+
+  /* HEN runs inside this WebProcess. Do not release the exploit heap or
+     navigate away until HEN's own end-of-install marker appears; the previous
+     handoff replaced the process about 50 ms after pthread_create and killed
+     the new thread before it could finish. */
+  const markerPath = cstr("/user/temp/hen.installed");
+  const wait = function (ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  };
+  const deadline = Date.now() + 15000;
+  let markerClosed = false, markerErrno = 0;
+  while (Date.now() < deadline) {
+    const marker = sc(S.open, markerPath.at, 0).i32;
+    if (marker >= 0) {
+      markerClosed = sc(S.close, marker).i32 === 0;
+      STATE.henInstalled = true;
+      break;
+    }
+    markerErrno = c.errno();
+    await wait(250);
+  }
+
+  if (!STATE.henInstalled) {
+    await checkpoint("HEN-MARKER-TIMEOUT",
+      "pthread started; marker absent after 15s; errno=" + markerErrno);
+    say("[p] HEN thread is still unconfirmed after 15 seconds; keeping this page alive");
+    return false;
+  }
+
+  await checkpoint("HEN-INSTALLED",
+    "/user/temp/hen.installed is present; close=" + markerClosed);
+  say("[p] HEN completion marker confirmed; allowing Welcome and epilogue to finish");
+  await wait(1000);
+
+  if (defused === true && typeof c.releaseAfterPayloadStart === "function") {
     STATE.terminalReleaseAttempted = true;
     let released = null;
     try {
       released = c.releaseAfterPayloadStart({
-        payload: true, defused: true, rc: rc, handle: text(handle),
+        payload: true, defused: true, installed: true,
+        rc: rc, handle: text(handle),
       });
     } catch (_) {}
-    return started;
+    return true;
   }
-  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + text(handle));
-  say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
-      + (started ? " -- running" : " -- did NOT start"));
-  return started;
+  return true;
 }
 
 /* End of file */

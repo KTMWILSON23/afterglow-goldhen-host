@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r5";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r5";
-import { int64 } from "./int64.js?v=hen1402r5";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r5";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r6";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r6";
+import { int64 } from "./int64.js?v=hen1402r6";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r6";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -1023,7 +1023,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r5");
+        const ag = await import("./afterglow-g.js?v=hen1402r6");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1060,7 +1060,6 @@ let allDone = false,
               "early=true pivot=true core=true rc=" + status.rc +
               " handle=" + status.handle);
             try { clearInterval(watchdog); } catch (_) {}
-            try { location.replace("done.html?v=hen1402r5"); } catch (_) {}
             return terminalReleaseResult;
           },
         };
@@ -1068,15 +1067,16 @@ let allDone = false,
           ag.probeAfterglow(agCtx);
         } else {
           const result = await ag.runAfterglow(agCtx);
-          const threadStarted = !!result && result.payload === true;
-          henInstalled = threadStarted && result.installed === true;
+          const threadStarted = !!result &&
+            (result.threadStarted === true || result.payload === true);
+          henInstalled = !!result && result.installed === true;
           mark("DEBUG-THREAD", henInstalled
             ? "HEN completion marker confirmed"
             : threadStarted
               ? "pthread_create returned success; HEN status unconfirmed"
               : "corrected HEN thread did not start");
           payloadRunning = threadStarted;
-          cleanupSafe = threadStarted && result.defused === true;
+          cleanupSafe = henInstalled && result.defused === true;
         }
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
@@ -1107,13 +1107,11 @@ let allDone = false,
             "early=false pivot=" + released.pivotRestored + " core=" + released.coreReleased);
         try { clearInterval(watchdog); } catch (_) {}
         finishUI(true);
-        if (!terminalReleaseAttempted)
-          try { location.replace("done.html?v=hen1402r5"); } catch (_) {}
         return;
       }
       finishUI(payloadRunning);
-      // Leave the actual outcome visible. The consumed same-tab token and
-      // persistent cold-boot lock prevent a restored page from firing again.
+      // Leave the actual outcome visible. The consumed same-tab token keeps a
+      // browser-restored launch page from firing automatically.
       return;
     }
     mark("JB-END", "afterglow is the kernel stage -- without afterglow= nothing runs here");
