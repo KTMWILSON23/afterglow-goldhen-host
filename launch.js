@@ -2,7 +2,7 @@
    this same-tab handoff again before it initializes WebKit. */
 (function () {
   "use strict";
-  const DEST = "launch.html?v=1402t&log=1&afterglow=run&payload=debug-1402-fixed.bin&retry=0&g=drain:16&g=drainsz:0x4000";
+  const DEST = "launch.html?v=1402u&log=1&afterglow=run&payload=debug-1402-fixed.bin&retry=0&g=drain:16&g=drainsz:0x4000";
   const LOCK = "debug-1402-attempted";
   const TOKEN = "debug-1402-tab-token";
   /* Keep the UI locked until the corrected payload and dynamic host path
@@ -12,7 +12,7 @@
   const content = document.querySelector(".content");
   const button = document.createElement("button");
   button.id = "startBtn";
-  button.textContent = "Start one corrected debug.bin attempt";
+  button.textContent = "Start one reduced 14.02 HEN attempt";
   button.disabled = true;
   if (content) content.appendChild(button);
 

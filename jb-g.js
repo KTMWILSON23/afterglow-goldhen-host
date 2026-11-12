@@ -1,7 +1,7 @@
-import { establishPrimitive } from "./core.js?v=debug1402o";
-import { installWindowP, pairStatus } from "./mem.js?v=debug1402o";
-import { int64 } from "./int64.js?v=debug1402o";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=debug1402o";
+import { establishPrimitive } from "./core.js?v=debug1402p";
+import { installWindowP, pairStatus } from "./mem.js?v=debug1402p";
+import { int64 } from "./int64.js?v=debug1402p";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=debug1402p";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -981,7 +981,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=debug1402o");
+        const ag = await import("./afterglow-g.js?v=debug1402p");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -998,7 +998,7 @@ let allDone = false,
           const threadStarted = !!result && result.payload === true;
           mark("DEBUG-THREAD", threadStarted
             ? "pthread_create returned success; HEN status unconfirmed"
-            : "corrected debug.bin thread did not start");
+            : "reduced HEN thread did not start");
           payloadRunning = threadStarted;
         }
       } catch (agError) {

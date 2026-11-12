@@ -22,14 +22,14 @@
 </head>
 <body>
   <main class="content">
-    <h1>PS4 14.02: corrected debug.bin</h1>
-    <p>This local page prepares one manual launch attempt. The payload comes
-      from the GitHub project with one verified 14.02 instruction address
-      correction. It is an experimental HEN payload.</p>
+    <h1>PS4 14.02: reduced HEN launch</h1>
+    <p>This is one real HEN launch attempt. It keeps the jailbreak and core
+      package-loading hooks, but avoids the unported menu and plugin writes
+      that froze the previous build.</p>
     <p id="count">Checking launch status...</p>
     <small>A kernel panic can power off the console. After any attempt, fully
       power it off before another one.</small>
   </main>
-  <script src="./launch.js?v=debug1402o"></script>
+  <script src="./launch.js?v=debug1402p"></script>
 </body>
 </html>

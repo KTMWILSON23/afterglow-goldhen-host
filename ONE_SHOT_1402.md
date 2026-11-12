@@ -17,22 +17,35 @@ snapshot, keeps the 200-slot guard, and logs the header fields.
 
 The repository's original `debug.bin` is retained unchanged. Its 14.02
 branch used the 14.00 SETLOGIN instruction address and would corrupt a live
-14.02 instruction. The first complete launch proved that the browser exploit,
+14.02 instruction. A complete launch later proved that the browser exploit,
 guarded kernel writes, privilege changes, payload copy, and payload thread all
-completed, but the PS4 UI then froze inside HEN startup. Offline comparison
-with the 14.00 source and decrypted 14.02 kernel found two more definite bad
-entries in the embedded 14.02 table: `sceSblACMgrGetPathId` pointed at an
-unrelated function with a different argument contract, and
+completed. HEN displayed its config-update notification, then the PS4 UI
+froze during later startup. Offline comparison with the decrypted 14.02 kernel
+found two more definite bad kernel-table entries: `sceSblACMgrGetPathId`
+pointed at an unrelated function with a different argument contract, and
 `RsaesPkcs1v15Dec2048CRT` pointed at the next, different wrapper.
 
-`tools/patch-debug-1402.py` verifies the original SHA-256, exact instruction,
-and exact old table values. It corrects only file bytes `0x18d6`, `0x18d7`,
-`0x10c6c`, `0x10c6d`, and `0x10c84`, then verifies the resulting
-`debug-1402-fixed.bin` SHA-256
-`89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b`.
+The supplied `ps4-hen-main (1).zip` then exposed the next fault. It contains
+dedicated 14.02 kernel files, but its ShellUI, RemotePlay, and ShellCore patch
+RVAs in `kpayload/source/offsets/1402.c` were copied from 14.00. The earliest
+unchecked write is inside the inner payload's `install_patches()` path. The
+archive still describes public support only through 12.02, so the 14.02 files
+must be treated as an incomplete port rather than a finished release.
+
+`tools/patch-debug-1402.py` verifies the original SHA-256, exact instructions,
+and exact old table values. It corrects the three proven kernel references,
+retains the FSELF/FPKG kernel hooks, and forces the inner payload to skip the
+unported process-patch and plugin-hook branches. The outer plugin injector and
+deliberate PartyDaemon/ShellUI restart are also skipped. The resulting
+`debug-1402-fixed.bin` SHA-256 is
+`f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a`.
 The nuanced `sceSblAuthMgrVerifyHeader` underlying-body target and the valid
-full-entry `sceSblPfsSetKeys` target are deliberately preserved. This remains
-an experimental HEN payload, not GoldHEN, until confirmed on hardware.
+full-entry `sceSblPfsSetKeys` target remain deliberately preserved.
+
+This is a real but reduced HEN launch candidate: jailbreak and core
+FSELF/FPKG package-authentication hooks remain, while menu extras, RemotePlay,
+plugins, and the forced UI restart are disabled. It is HEN, not GoldHEN, and
+hardware confirmation is still required.
 
 `debug_server.py` serves only to the configured PS4 IP on a new local port,
 adds no-store headers, verifies both binary hashes, and keeps checkpoint logs

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Patch proven 14.02 offsets in the published Akatsuki debug.bin.
+"""Patch the published Akatsuki debug.bin for a reduced 14.02 HEN launch.
 
 This is an offline, exact-image byte patch. It corrects the SETLOGIN target
 and two embedded kernel function addresses whose 14.02 counterparts were
-verified against the decrypted kernel. It does not prove the complete HEN
-runtime on hardware.
+verified against the decrypted kernel. It retains the FSELF/FPKG kernel hooks,
+but bypasses the unported 14.00-derived userland patch table, plugin hooks,
+optional ShellCore plugin-loader injection, and deliberate ShellUI restart.
+Those paths are the first known unsafe writes on 14.02. It does not prove the
+remaining HEN runtime on hardware.
 """
 
 from __future__ import annotations
@@ -19,7 +22,13 @@ import tempfile
 from pathlib import Path
 
 from capstone import CS_ARCH_X86, CS_MODE_64, Cs, __version__ as capstone_version
-from capstone.x86_const import X86_OP_MEM, X86_OP_REG, X86_REG_R10, X86_REG_RAX
+from capstone.x86_const import (
+    X86_OP_IMM,
+    X86_OP_MEM,
+    X86_OP_REG,
+    X86_REG_R10,
+    X86_REG_RAX,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,9 +37,13 @@ DEFAULT_OUTPUT = ROOT / "debug-1402-fixed.bin"
 
 SOURCE_REPOSITORY = "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 SOURCE_COMMIT = "689446d47fe1f3057923db7d7580efef3f182d87"
+HEN_SOURCE_ARCHIVE = "ps4-hen-main (1).zip"
+HEN_SOURCE_ARCHIVE_SHA256 = (
+    "bf418e981c40b8aa5aaf4874170eed98ba0b6c93228ba8e233542031739f3fac"
+)
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b"
+OUTPUT_SHA256 = "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -60,6 +73,27 @@ PRESERVED_TABLE_VALUES = (
     # This is the full 14.02 function entry; +0x40 would be mid-function.
     (0x10C98, "sceSblPfsSetKeys_addr", 0x006276F0),
 )
+
+# The 14.02 source archive copied its userland process-patch RVAs from 14.00.
+# Skip that block and plugin syscall installation while retaining the FSELF and
+# FPKG kernel hooks that execute immediately before these branches.
+INNER_USERLAND_PATCH_GATE_OFFSET = 0xBD8E
+INNER_USERLAND_PATCH_GATE = bytes.fromhex("7505")
+INNER_USERLAND_PATCH_BYPASS = bytes.fromhex("eb05")
+INNER_PLUGIN_HOOK_GATE_OFFSET = 0xBD9C
+INNER_PLUGIN_HOOK_GATE = bytes.fromhex("7427")
+INNER_PLUGIN_HOOK_BYPASS = bytes.fromhex("eb27")
+
+# These outer changes remove the optional ShellCore code-cave/plugin-loader
+# write and the following sleeps/process kills that restart PartyDaemon and
+# SceShellUI. The core HEN installer and Welcome notification remain.
+PLUGIN_LOADER_CALL_OFFSET = 0x53AC
+PLUGIN_LOADER_CALL = bytes.fromhex("e817070000")
+PLUGIN_LOADER_BYPASS = bytes.fromhex("9090909090")
+UI_RESTART_BLOCK_OFFSET = 0x5519
+UI_RESTART_BLOCK = bytes.fromhex("4585f60f8467010000")
+UI_RESTART_BYPASS = bytes.fromhex("e99601000090909090")
+MAIN_EPILOGUE_OFFSET = 0x56B4
 
 
 def sha256(data: bytes) -> str:
@@ -92,6 +126,49 @@ def verify_lea(image: bytes | bytearray, offset: int, expected: bytes, rva: int)
     ):
         raise ValueError(
             f"unexpected instruction at 0x{offset:x}: "
+            f"{instruction.mnemonic} {instruction.op_str}"
+        )
+
+
+def verify_epilogue_jump(image: bytes | bytearray) -> None:
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(
+        decoder.disasm(
+            bytes(image[UI_RESTART_BLOCK_OFFSET : UI_RESTART_BLOCK_OFFSET + 5]),
+            UI_RESTART_BLOCK_OFFSET,
+        )
+    )
+    if len(instructions) != 1 or instructions[0].size != 5:
+        raise ValueError("UI restart bypass is not exactly one instruction")
+    instruction = instructions[0]
+    if (
+        instruction.mnemonic != "jmp"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != X86_OP_IMM
+        or instruction.operands[0].imm != MAIN_EPILOGUE_OFFSET
+    ):
+        raise ValueError(
+            "UI restart bypass does not jump to the main epilogue: "
+            f"{instruction.mnemonic} {instruction.op_str}"
+        )
+
+
+def verify_short_jump(image: bytes | bytearray, offset: int, target: int) -> None:
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(decoder.disasm(bytes(image[offset : offset + 2]), offset))
+    if len(instructions) != 1 or instructions[0].size != 2:
+        raise ValueError(f"0x{offset:x} is not exactly one short instruction")
+    instruction = instructions[0]
+    if (
+        instruction.mnemonic != "jmp"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != X86_OP_IMM
+        or instruction.operands[0].imm != target
+    ):
+        raise ValueError(
+            f"short jump at 0x{offset:x} does not target 0x{target:x}: "
             f"{instruction.mnemonic} {instruction.op_str}"
         )
 
@@ -158,6 +235,94 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             }
         )
 
+    inner_branches = (
+        (
+            INNER_USERLAND_PATCH_GATE_OFFSET,
+            "skip unported 14.00-derived userland process patches",
+            INNER_USERLAND_PATCH_GATE,
+            INNER_USERLAND_PATCH_BYPASS,
+            0xBD95,
+        ),
+        (
+            INNER_PLUGIN_HOOK_GATE_OFFSET,
+            "skip plugin syscall hooks",
+            INNER_PLUGIN_HOOK_GATE,
+            INNER_PLUGIN_HOOK_BYPASS,
+            0xBDC5,
+        ),
+    )
+    for offset, label, old_bytes, new_bytes, target in inner_branches:
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} gate differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        verify_short_jump(changed, offset, target)
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "x86_64_short_jump",
+                "file_offset": f"0x{offset:x}",
+                "target_file_offset": f"0x{target:x}",
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+            }
+        )
+
+    actual_call = bytes(
+        original[
+            PLUGIN_LOADER_CALL_OFFSET : PLUGIN_LOADER_CALL_OFFSET
+            + len(PLUGIN_LOADER_CALL)
+        ]
+    )
+    if actual_call != PLUGIN_LOADER_CALL:
+        raise ValueError(
+            "ShellCore plugin-loader call differs at "
+            f"0x{PLUGIN_LOADER_CALL_OFFSET:x}: {actual_call.hex()}"
+        )
+    changed[
+        PLUGIN_LOADER_CALL_OFFSET : PLUGIN_LOADER_CALL_OFFSET
+        + len(PLUGIN_LOADER_CALL)
+    ] = PLUGIN_LOADER_BYPASS
+    manifest_patches.append(
+        {
+            "label": "skip optional ShellCore plugin-loader injection",
+            "kind": "x86_64_nop_call",
+            "file_offset": f"0x{PLUGIN_LOADER_CALL_OFFSET:x}",
+            "old_hex": PLUGIN_LOADER_CALL.hex(),
+            "new_hex": PLUGIN_LOADER_BYPASS.hex(),
+        }
+    )
+
+    actual_restart = bytes(
+        original[
+            UI_RESTART_BLOCK_OFFSET : UI_RESTART_BLOCK_OFFSET
+            + len(UI_RESTART_BLOCK)
+        ]
+    )
+    if actual_restart != UI_RESTART_BLOCK:
+        raise ValueError(
+            "ShellUI restart gate differs at "
+            f"0x{UI_RESTART_BLOCK_OFFSET:x}: {actual_restart.hex()}"
+        )
+    changed[
+        UI_RESTART_BLOCK_OFFSET : UI_RESTART_BLOCK_OFFSET
+        + len(UI_RESTART_BLOCK)
+    ] = UI_RESTART_BYPASS
+    verify_epilogue_jump(changed)
+    manifest_patches.append(
+        {
+            "label": "return after HEN Welcome instead of restarting ShellUI",
+            "kind": "x86_64_epilogue_jump",
+            "file_offset": f"0x{UI_RESTART_BLOCK_OFFSET:x}",
+            "target_file_offset": f"0x{MAIN_EPILOGUE_OFFSET:x}",
+            "old_hex": UI_RESTART_BLOCK.hex(),
+            "new_hex": UI_RESTART_BYPASS.hex(),
+        }
+    )
+
     result = bytes(changed)
     verify_lea(result, EXPECTED_OCCURRENCES[1], OLD_INSTRUCTION, OLD_LEA_DISP)
     for offset, label, expected in PRESERVED_TABLE_VALUES:
@@ -166,7 +331,17 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             raise ValueError(f"preserved value changed for {label}")
     if len(result) != INPUT_SIZE or sha256(result) != OUTPUT_SHA256:
         raise ValueError("patched output does not match its pinned SHA-256")
-    expected_changed = {0x18D6, 0x18D7, 0x10C6C, 0x10C6D, 0x10C84}
+    expected_changed = {
+        0x18D6,
+        0x18D7,
+        *range(0x53AC, 0x53B1),
+        *range(0x5519, 0x5522),
+        0xBD8E,
+        0xBD9C,
+        0x10C6C,
+        0x10C6D,
+        0x10C84,
+    }
     actual_changed = {i for i, (a, b) in enumerate(zip(original, result)) if a != b}
     if actual_changed != expected_changed:
         raise ValueError(f"unexpected changed byte positions: {sorted(actual_changed)!r}")
@@ -231,20 +406,35 @@ def main() -> None:
     original = input_path.read_bytes()
     patched, patches = patch_image(original)
     manifest = {
-        "purpose": "offline correction of three proven 14.02 payload offsets",
+        "purpose": (
+            "offline correction of three proven 14.02 payload offsets and a "
+            "reduced core-HEN launch that avoids unported userland/plugin paths"
+        ),
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
+        "hen_source_archive": {
+            "path": HEN_SOURCE_ARCHIVE,
+            "sha256": HEN_SOURCE_ARCHIVE_SHA256,
+            "unsafe_1402_table": "kpayload/source/offsets/1402.c",
+            "gated_callsite": "kpayload/source/patch.c",
+        },
         "input": {"path": input_path.name, "size": len(original), "sha256": INPUT_SHA256},
         "output": {"path": output_path.name, "size": len(patched), "sha256": OUTPUT_SHA256},
         "decoder": {"name": "Capstone", "version": capstone_version, "architecture": "x86_64"},
         "patches": patches,
-        "changed_byte_offsets": [
-            "0x18d6",
-            "0x18d7",
-            "0x10c6c",
-            "0x10c6d",
-            "0x10c84",
-        ],
+        "changed_byte_offsets": [f"0x{offset:x}" for offset in sorted(
+            {
+                0x18D6,
+                0x18D7,
+                *range(0x53AC, 0x53B1),
+                *range(0x5519, 0x5522),
+                0xBD8E,
+                0xBD9C,
+                0x10C6C,
+                0x10C6D,
+                0x10C84,
+            }
+        )],
         "preserved_1400_instruction_file_offset": "0x25d2",
         "preserved_table_values": [
             {
@@ -255,8 +445,11 @@ def main() -> None:
             for offset, label, value in PRESERVED_TABLE_VALUES
         ],
         "scope_limit": (
-            "Only the SETLOGIN target, sceSblACMgrGetPathId, and "
-            "RsaesPkcs1v15Dec2048CRT are corrected; hardware validation remains required."
+            "The SETLOGIN target, sceSblACMgrGetPathId, and "
+            "RsaesPkcs1v15Dec2048CRT are corrected. Jailbreak plus FSELF/FPKG "
+            "kernel hooks remain enabled. Unverified process/UI patches, plugin "
+            "hooks and injection, and the ShellUI/PartyDaemon restart are "
+            "skipped; hardware validation remains required."
         ),
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")

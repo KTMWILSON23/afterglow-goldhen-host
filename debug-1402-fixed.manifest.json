@@ -2,6 +2,22 @@
   "changed_byte_offsets": [
     "0x18d6",
     "0x18d7",
+    "0x53ac",
+    "0x53ad",
+    "0x53ae",
+    "0x53af",
+    "0x53b0",
+    "0x5519",
+    "0x551a",
+    "0x551b",
+    "0x551c",
+    "0x551d",
+    "0x551e",
+    "0x551f",
+    "0x5520",
+    "0x5521",
+    "0xbd8e",
+    "0xbd9c",
     "0x10c6c",
     "0x10c6d",
     "0x10c84"
@@ -11,6 +27,12 @@
     "name": "Capstone",
     "version": "5.0.7"
   },
+  "hen_source_archive": {
+    "gated_callsite": "kpayload/source/patch.c",
+    "path": "ps4-hen-main (1).zip",
+    "sha256": "bf418e981c40b8aa5aaf4874170eed98ba0b6c93228ba8e233542031739f3fac",
+    "unsafe_1402_table": "kpayload/source/offsets/1402.c"
+  },
   "input": {
     "path": "debug.bin",
     "sha256": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
@@ -18,7 +40,7 @@
   },
   "output": {
     "path": "debug-1402-fixed.bin",
-    "sha256": "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b",
+    "sha256": "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a",
     "size": 498720
   },
   "patches": [
@@ -53,6 +75,35 @@
       "new_rva": "0x0021c3d0",
       "old_hex_le": "e0c32100",
       "old_rva": "0x0021c3e0"
+    },
+    {
+      "file_offset": "0xbd8e",
+      "kind": "x86_64_short_jump",
+      "label": "skip unported 14.00-derived userland process patches",
+      "new_hex": "eb05",
+      "old_hex": "7505"
+    },
+    {
+      "file_offset": "0xbd9c",
+      "kind": "x86_64_short_jump",
+      "label": "skip plugin syscall hooks",
+      "new_hex": "eb27",
+      "old_hex": "7427"
+    },
+    {
+      "file_offset": "0x53ac",
+      "kind": "x86_64_nop_call",
+      "label": "skip optional ShellCore plugin-loader injection",
+      "new_hex": "9090909090",
+      "old_hex": "e817070000"
+    },
+    {
+      "file_offset": "0x5519",
+      "kind": "x86_64_epilogue_jump",
+      "label": "return after HEN Welcome instead of restarting ShellUI",
+      "new_hex": "e99601000090909090",
+      "old_hex": "4585f60f8467010000",
+      "target_file_offset": "0x56b4"
     }
   ],
   "preserved_1400_instruction_file_offset": "0x25d2",
@@ -68,8 +119,8 @@
       "rva": "0x006276f0"
     }
   ],
-  "purpose": "offline correction of three proven 14.02 payload offsets",
-  "scope_limit": "Only the SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected; hardware validation remains required.",
+  "purpose": "offline correction of three proven 14.02 payload offsets and a reduced core-HEN launch that avoids unported userland/plugin paths",
+  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. Unverified process/UI patches, plugin hooks and injection, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
   "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
   "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 }

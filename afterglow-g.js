@@ -24,7 +24,7 @@ import { sha256Hex } from "./sha256.js";
 
 const DEBUG_BIN = {
   length: 498720,
-  sha256: "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b",
+  sha256: "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a",
 };
 const CANDIDATE_READY = true;
 
@@ -1177,21 +1177,21 @@ async function attempt(ctx, opts) {
   opts = opts || {};
   STATE.retry = false;
   if (!CANDIDATE_READY) {
-    say("[p] corrected debug.bin launch paused pending host review");
+    say("[p] reduced 14.02 HEN launch paused pending host review");
     return false;
   }
   if (ctx.firmware !== "14.02") {
     say("debug.bin one-shot is restricted to firmware 14.02");
     return false;
   }
-  say("afterglow -- one 14.02 attempt to start corrected GitHub debug.bin");
+  say("afterglow -- one 14.02 attempt to start the reduced HEN build");
   const debugBytes = await fetchBytes("debug-1402-fixed.bin", "p");
   if (!debugBytes || debugBytes.length !== DEBUG_BIN.length ||
       sha256Hex(debugBytes) !== DEBUG_BIN.sha256) {
-    say("[p] corrected debug.bin SHA-256 or length mismatch -- no kernel shot fired");
+    say("[p] reduced HEN SHA-256 or length mismatch -- no kernel shot fired");
     return false;
   }
-  say("[p] corrected GitHub debug.bin SHA-256 verified before kernel stage");
+  say("[p] reduced HEN SHA-256 verified before kernel stage");
 
   const missing = seedStubs();
   if (missing.length) {
@@ -1710,17 +1710,17 @@ async function attempt(ctx, opts) {
   /* Debug-menu heuristic writes removed; debug.bin handles its own runtime. */
 
   /* ---- Load debug.bin payload ---- */
-  say("[p] Attempting to start corrected debug.bin as a thread");
+  say("[p] Attempting to start reduced HEN as a thread");
   try {
     iface.payload = await loadPayload("debug-1402-fixed.bin", debugBytes);
     if (iface.payload) {
       say("[p] pthread_create returned success; HEN runtime remains unconfirmed");
     } else {
-      say("[p] corrected debug.bin thread did not start");
+      say("[p] reduced HEN thread did not start");
     }
   } catch (e) {
     iface.payload = false;
-    say("[p] Error starting corrected debug.bin: " + (e && e.message));
+    say("[p] Error starting reduced HEN: " + (e && e.message));
   }
 
   say("[p] one-shot finished; kernel patches " + done + "/" + PATCHES.length +
@@ -1831,14 +1831,14 @@ async function loadPayload(url, vorab) {
     }
   }
   
-  say("[p] corrected debug.bin copied byte-for-byte and verified, starting thread");
+  say("[p] reduced HEN copied byte-for-byte and verified, starting thread");
 
   const fn = STATE.pthread;
   if (!fn) {
     say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
     return false;
   }
-  if (!await checkpoint("pthread-armed", "starting corrected debug.bin thread")) {
+  if (!await checkpoint("pthread-armed", "starting reduced HEN thread")) {
     say("[p] PC collector did not acknowledge payload start");
     return false;
   }
