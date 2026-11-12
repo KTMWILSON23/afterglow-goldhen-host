@@ -1,7 +1,7 @@
 """Local, no-store host for the isolated 14.02 debug.bin experiment.
 
-The launcher remains disabled in this worktree until the corrected payload
-and the host are reviewed. This server does not contact PS4s.
+The launcher is manual and permits one attempt after a cold boot. This
+server only responds to the configured PS4 peer; it never contacts a PS4.
 """
 
 import argparse

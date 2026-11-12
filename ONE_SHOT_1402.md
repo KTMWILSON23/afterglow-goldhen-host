@@ -1,9 +1,12 @@
 # PS4 14.02 corrected debug.bin experiment
 
 This branch is a one-shot candidate based on Akatsuki commit
-`689446d47fe1f3057923db7d7580efef3f182d87`. It has not been run on
-the 14.02 PS4. The manual launcher was enabled after independent offline
-review; a kernel panic remains possible.
+`689446d47fe1f3057923db7d7580efef3f182d87`. The manual launcher was
+enabled after independent offline review; a kernel panic remains possible.
+The first 14.02 run stopped before any kernel shot because its thread-function
+resolver expected a module base in an information field that is empty in this
+browser. The corrected launcher reads the existing WebKit pthread_create
+import slot and verifies both the slot and its target against live mappings.
 
 The repository's original `debug.bin` is retained unchanged. Its 14.02
 branch used the 14.00 SETLOGIN instruction address and would corrupt a live
@@ -27,5 +30,5 @@ Known limit: the APM UAF shots can still panic. The file descriptor array may
 change while the next shot is prepared, and each map shot follows multiple
 links before JavaScript can inspect them. Teardown must verify all device and
 queue handles and notes; a failure requires leaving the page open until a
-full console power off. No console run, public deployment, or push was made
-while preparing this candidate.
+full console power off. The first run stopped before any kernel shot or payload
+start. No public deployment or push was made while preparing this candidate.
