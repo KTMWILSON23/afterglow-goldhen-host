@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r4";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r4";
-import { int64 } from "./int64.js?v=hen1402r4";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r4";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r5";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r5";
+import { int64 } from "./int64.js?v=hen1402r5";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r5";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -1018,11 +1018,12 @@ let allDone = false,
       let cleanupSafe = false;
       let terminalReleaseAttempted = false;
       let terminalReleaseResult = null;
+      let henInstalled = false;
       /* Arming requires a step from the landing page. A probe
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r4");
+        const ag = await import("./afterglow-g.js?v=hen1402r5");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1059,7 +1060,7 @@ let allDone = false,
               "early=true pivot=true core=true rc=" + status.rc +
               " handle=" + status.handle);
             try { clearInterval(watchdog); } catch (_) {}
-            try { location.replace("done.html?v=hen1402r4"); } catch (_) {}
+            try { location.replace("done.html?v=hen1402r5"); } catch (_) {}
             return terminalReleaseResult;
           },
         };
@@ -1068,9 +1069,12 @@ let allDone = false,
         } else {
           const result = await ag.runAfterglow(agCtx);
           const threadStarted = !!result && result.payload === true;
-          mark("DEBUG-THREAD", threadStarted
-            ? "pthread_create returned success; HEN status unconfirmed"
-            : "corrected HEN thread did not start");
+          henInstalled = threadStarted && result.installed === true;
+          mark("DEBUG-THREAD", henInstalled
+            ? "HEN completion marker confirmed"
+            : threadStarted
+              ? "pthread_create returned success; HEN status unconfirmed"
+              : "corrected HEN thread did not start");
           payloadRunning = threadStarted;
           cleanupSafe = threadStarted && result.defused === true;
         }
@@ -1078,9 +1082,11 @@ let allDone = false,
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
       }
       allDone = true;
-      mark("ONE-SHOT-END", payloadRunning
-        ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
-        : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
+      mark("ONE-SHOT-END", henInstalled
+        ? "HEN completion marker confirmed; HEN is installed on this boot"
+        : payloadRunning
+          ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
+          : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
       if (cleanupSafe) {
         const released = terminalReleaseAttempted
           ? terminalReleaseResult
@@ -1102,7 +1108,7 @@ let allDone = false,
         try { clearInterval(watchdog); } catch (_) {}
         finishUI(true);
         if (!terminalReleaseAttempted)
-          try { location.replace("done.html?v=hen1402r4"); } catch (_) {}
+          try { location.replace("done.html?v=hen1402r5"); } catch (_) {}
         return;
       }
       finishUI(payloadRunning);

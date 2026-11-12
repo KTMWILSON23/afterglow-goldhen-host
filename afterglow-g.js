@@ -1183,8 +1183,17 @@ async function attempt(ctx, opts) {
   {
     const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
     if (m0.i32 !== -1 && sc(S.mprotect, v(m0.lo, m0.hi), 0x4000, 7).i32 === 0) {
-      say("  this kernel is already open -- a run has succeeded on this boot.");
-      say("  Not firing again; reboot the console for a fresh one.");
+      const marker = sc(S.open, cstr("/user/temp/hen.installed").at, 0).i32;
+      const markerErrno = marker < 0 ? host().errno() : 0;
+      if (marker >= 0) {
+        const markerClosed = sc(S.close, marker).i32 === 0;
+        say("[p] HEN completion marker found -- HEN is installed on this boot");
+        await checkpoint("HEN-INSTALLED",
+          "/user/temp/hen.installed is present; close=" + markerClosed);
+        return { payload: true, defused: true, installed: true, alreadyOpen: true };
+      }
+      say("[p] kernel is open but the HEN completion marker is absent, errno " + markerErrno);
+      await checkpoint("HEN-MARKER-MISSING", "open errno=" + markerErrno);
       return false;
     }
   }
