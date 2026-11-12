@@ -26,7 +26,7 @@ const DEBUG_BIN = {
   length: 498720,
   sha256: "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
 };
-const CANDIDATE_READY = false;
+const CANDIDATE_READY = true;
 
 const S = {
   read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, socket: 97, setsockopt: 105,

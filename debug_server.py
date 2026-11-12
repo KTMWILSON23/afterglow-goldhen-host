@@ -123,7 +123,7 @@ def main():
         verified_debug_bytes(name)
     Handler.peer = args.peer
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    print("Local one-shot host on http://%s:%d/ for %s; launch is PAUSED" %
+    print("Local one-shot host on http://%s:%d/ for %s; manual launch is ENABLED" %
           (args.bind, args.port, args.peer), flush=True)
     server.serve_forever()
 

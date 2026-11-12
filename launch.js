@@ -7,7 +7,7 @@
   const TOKEN = "debug-1402-tab-token";
   /* Keep the UI locked until the corrected payload and dynamic host path
      have completed review together. */
-  const CANDIDATE_READY = false;
+  const CANDIDATE_READY = true;
   const count = document.getElementById("count");
   const content = document.querySelector(".content");
   const button = document.createElement("button");

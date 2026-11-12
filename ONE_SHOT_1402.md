@@ -1,9 +1,9 @@
 # PS4 14.02 corrected debug.bin experiment
 
-This branch is an offline candidate based on Akatsuki commit
+This branch is a one-shot candidate based on Akatsuki commit
 `689446d47fe1f3057923db7d7580efef3f182d87`. It has not been run on
-the 14.02 PS4. The launcher is deliberately paused by `CANDIDATE_READY` in
-`launch.js` and `afterglow-g.js` until review.
+the 14.02 PS4. The manual launcher was enabled after independent offline
+review; a kernel panic remains possible.
 
 The repository's original `debug.bin` is retained unchanged. Its 14.02
 branch used the 14.00 SETLOGIN instruction address and would corrupt a live
