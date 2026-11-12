@@ -1,0 +1,220 @@
+{
+  "changed_byte_offsets": [
+    "0x7c6",
+    "0x7ce",
+    "0x7d8",
+    "0x18d6",
+    "0x18d7",
+    "0x468d",
+    "0x468e",
+    "0x46bb",
+    "0x46bc",
+    "0x46bd",
+    "0x46be",
+    "0x46c0",
+    "0x4aef",
+    "0x4af0",
+    "0x4af1",
+    "0x4af2",
+    "0x52da",
+    "0x52db",
+    "0x52dc",
+    "0x52df",
+    "0x53ac",
+    "0x53ad",
+    "0x53ae",
+    "0x53af",
+    "0x53b0",
+    "0x5519",
+    "0x551a",
+    "0x551b",
+    "0x551c",
+    "0x551d",
+    "0x551e",
+    "0x551f",
+    "0x5520",
+    "0x5521",
+    "0xbd8e",
+    "0xbd9c",
+    "0xd686",
+    "0xd687",
+    "0xd688",
+    "0xd689",
+    "0xd8ac",
+    "0x10c6c",
+    "0x10c6d",
+    "0x10c84"
+  ],
+  "decoder": {
+    "architecture": "x86_64",
+    "name": "Capstone",
+    "version": "5.0.7"
+  },
+  "hen_source_archive": {
+    "gated_callsite": "kpayload/source/patch.c",
+    "path": "ps4-hen-main (1).zip",
+    "sha256": "bf418e981c40b8aa5aaf4874170eed98ba0b6c93228ba8e233542031739f3fac",
+    "unsafe_1402_table": "kpayload/source/offsets/1402.c"
+  },
+  "input": {
+    "path": "debug.bin",
+    "sha256": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
+    "size": 498720
+  },
+  "output": {
+    "path": "hen-1402-core.bin",
+    "sha256": "4941b6360d9274a7cda1e14e91569a034062b8e25f2aa2710fc9a59dfc7f5e79",
+    "size": 498720
+  },
+  "patches": [
+    {
+      "base": "IA32_LSTAR",
+      "base_rva": "0x1c0",
+      "displacement_file_offset": "0x18d6",
+      "instruction_file_offset": "0x18d3",
+      "kind": "x86_64_lea_displacement",
+      "label": "SETLOGIN LEA 14.02 branch",
+      "new_displacement": "0x394e2c",
+      "new_instruction_hex": "4c8d902c4e3900",
+      "new_target_rva": "0x394fec",
+      "old_displacement": "0x394abc",
+      "old_instruction_hex": "4c8d90bc4a3900",
+      "old_target_rva": "0x394c7c"
+    },
+    {
+      "file_offset": "0x10c6c",
+      "kind": "embedded_fw_offsets_u32",
+      "label": "sceSblACMgrGetPathId_addr",
+      "new_hex_le": "503c3b00",
+      "new_rva": "0x003b3c50",
+      "old_hex_le": "c03b3b00",
+      "old_rva": "0x003b3bc0"
+    },
+    {
+      "file_offset": "0x10c84",
+      "kind": "embedded_fw_offsets_u32",
+      "label": "RsaesPkcs1v15Dec2048CRT_addr",
+      "new_hex_le": "d0c32100",
+      "new_rva": "0x0021c3d0",
+      "old_hex_le": "e0c32100",
+      "old_rva": "0x0021c3e0"
+    },
+    {
+      "file_offset": "0x7c6",
+      "kind": "safe_in_memory_default",
+      "label": "disable exploit-fix helper by default",
+      "new_hex": "00",
+      "old_hex": "01"
+    },
+    {
+      "file_offset": "0x7ce",
+      "kind": "safe_in_memory_default",
+      "label": "disable ASLR helper by default",
+      "new_hex": "00",
+      "old_hex": "01"
+    },
+    {
+      "file_offset": "0x7d8",
+      "kind": "safe_in_memory_default",
+      "label": "zero mmap, update-blocker, PRX and plugin defaults",
+      "new_hex": "03",
+      "old_hex": "02"
+    },
+    {
+      "file_offset": "0x468c",
+      "kind": "x86_64_near_call",
+      "label": "use safe in-memory HEN defaults without HDD config I/O",
+      "new_hex": "e81ec1ffff",
+      "old_hex": "e820caffff",
+      "target_file_offset": "0x7af"
+    },
+    {
+      "file_offset": "0xbd8e",
+      "kind": "x86_64_short_jump",
+      "label": "skip unported 14.00-derived userland process patches",
+      "new_hex": "eb05",
+      "old_hex": "7505",
+      "target_file_offset": "0xbd95"
+    },
+    {
+      "file_offset": "0xbd9c",
+      "kind": "x86_64_short_jump",
+      "label": "skip plugin syscall hooks",
+      "new_hex": "eb27",
+      "old_hex": "7427",
+      "target_file_offset": "0xbdc5"
+    },
+    {
+      "file_offset": "0x46bb",
+      "kind": "x86_64_near_jump",
+      "label": "skip first-run config notification and delay",
+      "new_hex": "e92f04000090",
+      "old_hex": "0f842e040000",
+      "target_file_offset": "0x4aef"
+    },
+    {
+      "file_offset": "0x4aef",
+      "kind": "x86_64_near_jump",
+      "label": "skip unsupported optional 14.02 installer helpers",
+      "new_hex": "e91a040000",
+      "old_hex": "837c242800",
+      "target_file_offset": "0x4f0e"
+    },
+    {
+      "file_offset": "0x52da",
+      "kind": "x86_64_near_jump",
+      "label": "skip unused plugin PRX upload",
+      "new_hex": "e9c600000090",
+      "old_hex": "0f84c5000000",
+      "target_file_offset": "0x53a5"
+    },
+    {
+      "file_offset": "0xd686",
+      "kind": "x86_64_context_recovery",
+      "label": "recover 14.02 SELF segment context from caller R14",
+      "new_assembly": "mov rdi, r14; nop",
+      "new_hex": "4c89f790",
+      "old_hex": "488b78f8"
+    },
+    {
+      "file_offset": "0xd8aa",
+      "kind": "x86_64_context_recovery",
+      "label": "recover 14.02 SELF block context from saved caller R15",
+      "new_assembly": "mov rdi, qword ptr [rbp - 8]",
+      "new_hex": "488b7df8",
+      "old_hex": "488b78f8"
+    },
+    {
+      "file_offset": "0x53ac",
+      "kind": "x86_64_nop_call",
+      "label": "skip optional ShellCore plugin-loader injection",
+      "new_hex": "9090909090",
+      "old_hex": "e817070000"
+    },
+    {
+      "file_offset": "0x5519",
+      "kind": "x86_64_epilogue_jump",
+      "label": "return after HEN Welcome instead of restarting ShellUI",
+      "new_hex": "e99601000090909090",
+      "old_hex": "4585f60f8467010000",
+      "target_file_offset": "0x56b4"
+    }
+  ],
+  "preserved_1400_instruction_file_offset": "0x25d2",
+  "preserved_table_values": [
+    {
+      "file_offset": "0x10c80",
+      "label": "sceSblAuthMgrVerifyHeader_addr",
+      "rva": "0x00640930"
+    },
+    {
+      "file_offset": "0x10c98",
+      "label": "sceSblPfsSetKeys_addr",
+      "rva": "0x006276f0"
+    }
+  ],
+  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that avoids unsupported optional and unported userland/plugin paths",
+  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
+  "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
+  "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
+}

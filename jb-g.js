@@ -1,7 +1,7 @@
-import { establishPrimitive } from "./core.js?v=debug1402p";
-import { installWindowP, pairStatus } from "./mem.js?v=debug1402p";
-import { int64 } from "./int64.js?v=debug1402p";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=debug1402p";
+import { establishPrimitive } from "./core.js?v=hen1402r1";
+import { installWindowP, pairStatus } from "./mem.js?v=hen1402r1";
+import { int64 } from "./int64.js?v=hen1402r1";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r1";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -67,10 +67,10 @@ const HANDOFF_OK = (function () {
   const run = params.get("run") || "";
   if (!/^[0-9]+-[0-9]+$/.test(run)) return false;
   try {
-    const good = sessionStorage.getItem("debug-1402-tab-token") === run &&
-      localStorage.getItem("debug-1402-attempted") === run + ":started";
-    sessionStorage.removeItem("debug-1402-tab-token");
-    if (good) localStorage.setItem("debug-1402-attempted", run + ":armed");
+    const good = sessionStorage.getItem("hen-1402-core-tab-token") === run &&
+      localStorage.getItem("hen-1402-core-attempted") === run + ":started";
+    sessionStorage.removeItem("hen-1402-core-tab-token");
+    if (good) localStorage.setItem("hen-1402-core-attempted", run + ":armed");
     return good;
   } catch (_) { return false; }
 })();
@@ -355,7 +355,7 @@ let allDone = false,
   try {
     const { key, off } = offsetsFor(navigator.userAgent);
     if (params.get("afterglow") === "run" && key !== "14.02") {
-      mark("FW-BLOCK", "one-shot debug.bin route requires firmware 14.02");
+      mark("FW-BLOCK", "corrected HEN route requires firmware 14.02");
       finishUI(false);
       return;
     }
@@ -981,7 +981,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=debug1402p");
+        const ag = await import("./afterglow-g.js?v=hen1402r1");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -998,7 +998,7 @@ let allDone = false,
           const threadStarted = !!result && result.payload === true;
           mark("DEBUG-THREAD", threadStarted
             ? "pthread_create returned success; HEN status unconfirmed"
-            : "reduced HEN thread did not start");
+            : "corrected HEN thread did not start");
           payloadRunning = threadStarted;
         }
       } catch (agError) {

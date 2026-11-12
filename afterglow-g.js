@@ -22,9 +22,9 @@ import { int64 } from "./int64.js";
 import { deriveBaseFromLeak, validateKernelHeader } from "./kernel-format-1402.js";
 import { sha256Hex } from "./sha256.js";
 
-const DEBUG_BIN = {
+const HEN_BIN = {
   length: 498720,
-  sha256: "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a",
+  sha256: "4941b6360d9274a7cda1e14e91569a034062b8e25f2aa2710fc9a59dfc7f5e79",
 };
 const CANDIDATE_READY = true;
 
@@ -1177,21 +1177,21 @@ async function attempt(ctx, opts) {
   opts = opts || {};
   STATE.retry = false;
   if (!CANDIDATE_READY) {
-    say("[p] reduced 14.02 HEN launch paused pending host review");
+    say("[p] corrected 14.02 HEN launch paused pending host review");
     return false;
   }
   if (ctx.firmware !== "14.02") {
-    say("debug.bin one-shot is restricted to firmware 14.02");
+    say("corrected HEN launch is restricted to firmware 14.02");
     return false;
   }
-  say("afterglow -- one 14.02 attempt to start the reduced HEN build");
-  const debugBytes = await fetchBytes("debug-1402-fixed.bin", "p");
-  if (!debugBytes || debugBytes.length !== DEBUG_BIN.length ||
-      sha256Hex(debugBytes) !== DEBUG_BIN.sha256) {
-    say("[p] reduced HEN SHA-256 or length mismatch -- no kernel shot fired");
+  say("afterglow -- one 14.02 attempt to start the corrected HEN build");
+  const henBytes = await fetchBytes("hen-1402-core.bin", "p");
+  if (!henBytes || henBytes.length !== HEN_BIN.length ||
+      sha256Hex(henBytes) !== HEN_BIN.sha256) {
+    say("[p] corrected HEN SHA-256 or length mismatch -- no kernel shot fired");
     return false;
   }
-  say("[p] reduced HEN SHA-256 verified before kernel stage");
+  say("[p] corrected HEN SHA-256 verified before kernel stage");
 
   const missing = seedStubs();
   if (missing.length) {
@@ -1707,20 +1707,20 @@ async function attempt(ctx, opts) {
     return iface;
   }
 
-  /* Debug-menu heuristic writes removed; debug.bin handles its own runtime. */
+  /* Unsupported debug-menu writes are omitted; HEN handles its core runtime. */
 
-  /* ---- Load debug.bin payload ---- */
-  say("[p] Attempting to start reduced HEN as a thread");
+  /* ---- Load corrected HEN payload ---- */
+  say("[p] Attempting to start corrected HEN as a thread");
   try {
-    iface.payload = await loadPayload("debug-1402-fixed.bin", debugBytes);
+    iface.payload = await loadPayload("hen-1402-core.bin", henBytes);
     if (iface.payload) {
       say("[p] pthread_create returned success; HEN runtime remains unconfirmed");
     } else {
-      say("[p] reduced HEN thread did not start");
+      say("[p] corrected HEN thread did not start");
     }
   } catch (e) {
     iface.payload = false;
-    say("[p] Error starting reduced HEN: " + (e && e.message));
+    say("[p] Error starting corrected HEN: " + (e && e.message));
   }
 
   say("[p] one-shot finished; kernel patches " + done + "/" + PATCHES.length +
@@ -1831,14 +1831,14 @@ async function loadPayload(url, vorab) {
     }
   }
   
-  say("[p] reduced HEN copied byte-for-byte and verified, starting thread");
+  say("[p] corrected HEN copied byte-for-byte and verified, starting thread");
 
   const fn = STATE.pthread;
   if (!fn) {
     say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
     return false;
   }
-  if (!await checkpoint("pthread-armed", "starting reduced HEN thread")) {
+  if (!await checkpoint("pthread-armed", "starting corrected HEN thread")) {
     say("[p] PC collector did not acknowledge payload start");
     return false;
   }

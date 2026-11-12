@@ -1,4 +1,4 @@
-"""Local, no-store host for the isolated 14.02 debug.bin experiment.
+"""Local, no-store host for the isolated 14.02 HEN launch.
 
 The launcher is manual and permits one attempt after a cold boot. This
 server only responds to the configured PS4 peer; it never contacts a PS4.
@@ -21,12 +21,14 @@ LOG_DIR = ROOT.parent / "debug-captures"
 DEBUG_HASHES = {
     "debug.bin": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
     "debug-1402-fixed.bin": "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a",
+    "hen-1402-core.bin": "4941b6360d9274a7cda1e14e91569a034062b8e25f2aa2710fc9a59dfc7f5e79",
 }
 DEBUG_SIZE = 498720
 FILES = frozenset({
     "index.html", "launch.html", "style.css", "launch.js", "jb-g.js",
     "core.js", "mem.js", "int64.js", "ps4_offsets.js", "afterglow-g.js",
     "kernel-format-1402.js", "sha256.js", "debug.bin", "debug-1402-fixed.bin",
+    "hen-1402-core.bin",
 })
 RUN_RE = re.compile(r"^[0-9]{8,16}-[0-9]{6,20}$")
 TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")

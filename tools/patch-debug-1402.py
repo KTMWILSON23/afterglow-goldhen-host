@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Patch the published Akatsuki debug.bin for a reduced 14.02 HEN launch.
+"""Patch the published Akatsuki debug.bin for a core 14.02 HEN launch.
 
 This is an offline, exact-image byte patch. It corrects the SETLOGIN target
 and two embedded kernel function addresses whose 14.02 counterparts were
 verified against the decrypted kernel. It retains the FSELF/FPKG kernel hooks,
-but bypasses the unported 14.00-derived userland patch table, plugin hooks,
-optional ShellCore plugin-loader injection, and deliberate ShellUI restart.
-Those paths are the first known unsafe writes on 14.02. It does not prove the
-remaining HEN runtime on hardware.
+but bypasses unsupported optional installer actions, the unported
+14.00-derived userland patch table, plugin hooks, optional ShellCore
+plugin-loader injection, and deliberate ShellUI restart. Those paths are the
+first known unsafe writes on 14.02. It does not prove the remaining HEN
+runtime on hardware.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from capstone.x86_const import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "debug.bin"
-DEFAULT_OUTPUT = ROOT / "debug-1402-fixed.bin"
+DEFAULT_OUTPUT = ROOT / "hen-1402-core.bin"
 
 SOURCE_REPOSITORY = "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 SOURCE_COMMIT = "689446d47fe1f3057923db7d7580efef3f182d87"
@@ -43,7 +44,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a"
+OUTPUT_SHA256 = "4941b6360d9274a7cda1e14e91569a034062b8e25f2aa2710fc9a59dfc7f5e79"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -83,6 +84,53 @@ INNER_USERLAND_PATCH_BYPASS = bytes.fromhex("eb05")
 INNER_PLUGIN_HOOK_GATE_OFFSET = 0xBD9C
 INNER_PLUGIN_HOOK_GATE = bytes.fromhex("7427")
 INNER_PLUGIN_HOOK_BYPASS = bytes.fromhex("eb27")
+
+# The 14.02 callers keep their SELF context in registers rather than at the
+# 14.00-derived caller frame slot used by these two mailbox hooks. Recover it
+# from the live R14/R15 values saved by each hook's own prologue.
+FSELF_SEGMENT_CONTEXT_OFFSET = 0xD686
+FSELF_SEGMENT_CONTEXT = bytes.fromhex("488b78f8")
+FSELF_SEGMENT_CONTEXT_FIX = bytes.fromhex("4c89f790")
+FSELF_BLOCK_CONTEXT_OFFSET = 0xD8AA
+FSELF_BLOCK_CONTEXT = bytes.fromhex("488b78f8")
+FSELF_BLOCK_CONTEXT_FIX = bytes.fromhex("488b7df8")
+
+# Use the existing in-memory default initializer without touching /data/hen,
+# and change its defaults so every non-core installer/plugin option is off.
+SAFE_DEFAULT_PATCHES = (
+    (0x7C6, "disable exploit-fix helper by default", bytes.fromhex("01"), bytes.fromhex("00")),
+    (0x7CE, "disable ASLR helper by default", bytes.fromhex("01"), bytes.fromhex("00")),
+    (0x7D8, "zero mmap, update-blocker, PRX and plugin defaults", bytes.fromhex("02"), bytes.fromhex("03")),
+)
+CONFIG_INIT_CALL_OFFSET = 0x468C
+CONFIG_INIT_CALL = bytes.fromhex("e820caffff")
+CONFIG_DEFAULTS_CALL = bytes.fromhex("e81ec1ffff")
+CONFIG_DEFAULTS_TARGET = 0x7AF
+
+# The first-run config refresh is cosmetic after init_config has already
+# populated the in-memory defaults. Skip its notification and five-second
+# sleep. The config remains loaded, so this does not leave the structure
+# uninitialised.
+CONFIG_REFRESH_GATE_OFFSET = 0x46BB
+CONFIG_REFRESH_GATE = bytes.fromhex("0f842e040000")
+CONFIG_REFRESH_BYPASS = bytes.fromhex("e92f04000090")
+CONFIG_REFRESH_TARGET = 0x4AEF
+
+# These installer helpers are optional and the linked payload SDK has no
+# 14.02 entries for mmap or ASLR. Skip the entire optional block, including
+# exploit-fix, update-blocker and NoBD helpers, before entering the real HEN
+# kernel payload at 0x4f0e.
+OUTER_OPTIONAL_BLOCK_OFFSET = 0x4AEF
+OUTER_OPTIONAL_BLOCK = bytes.fromhex("837c242800")
+OUTER_OPTIONAL_BYPASS = bytes.fromhex("e91a040000")
+OUTER_OPTIONAL_TARGET = 0x4F0E
+
+# Plugin loading is already disabled below. Avoid writing the unused PRX
+# bundle to /data/hen as well; the core FSELF/FPKG hooks do not need it.
+PRX_UPLOAD_GATE_OFFSET = 0x52DA
+PRX_UPLOAD_GATE = bytes.fromhex("0f84c5000000")
+PRX_UPLOAD_BYPASS = bytes.fromhex("e9c600000090")
+PRX_UPLOAD_TARGET = 0x53A5
 
 # These outer changes remove the optional ShellCore code-cave/plugin-loader
 # write and the following sleeps/process kills that restart PartyDaemon and
@@ -173,6 +221,44 @@ def verify_short_jump(image: bytes | bytearray, offset: int, target: int) -> Non
         )
 
 
+def verify_near_jump(image: bytes | bytearray, offset: int, target: int) -> None:
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(decoder.disasm(bytes(image[offset : offset + 5]), offset))
+    if len(instructions) != 1 or instructions[0].size != 5:
+        raise ValueError(f"0x{offset:x} is not exactly one near jump")
+    instruction = instructions[0]
+    if (
+        instruction.mnemonic != "jmp"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != X86_OP_IMM
+        or instruction.operands[0].imm != target
+    ):
+        raise ValueError(
+            f"near jump at 0x{offset:x} does not target 0x{target:x}: "
+            f"{instruction.mnemonic} {instruction.op_str}"
+        )
+
+
+def verify_near_call(image: bytes | bytearray, offset: int, target: int) -> None:
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(decoder.disasm(bytes(image[offset : offset + 5]), offset))
+    if len(instructions) != 1 or instructions[0].size != 5:
+        raise ValueError(f"0x{offset:x} is not exactly one near call")
+    instruction = instructions[0]
+    if (
+        instruction.mnemonic != "call"
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != X86_OP_IMM
+        or instruction.operands[0].imm != target
+    ):
+        raise ValueError(
+            f"near call at 0x{offset:x} does not target 0x{target:x}: "
+            f"{instruction.mnemonic} {instruction.op_str}"
+        )
+
+
 def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     if len(original) != INPUT_SIZE or sha256(original) != INPUT_SHA256:
         raise ValueError("input is not the exact published Akatsuki debug.bin")
@@ -235,6 +321,49 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             }
         )
 
+    for offset, label, old_bytes, new_bytes in SAFE_DEFAULT_PATCHES:
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "safe_in_memory_default",
+                "file_offset": f"0x{offset:x}",
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+            }
+        )
+
+    actual_config_call = bytes(
+        original[
+            CONFIG_INIT_CALL_OFFSET : CONFIG_INIT_CALL_OFFSET + len(CONFIG_INIT_CALL)
+        ]
+    )
+    if actual_config_call != CONFIG_INIT_CALL:
+        raise ValueError(
+            f"config init call differs at 0x{CONFIG_INIT_CALL_OFFSET:x}: "
+            f"expected {CONFIG_INIT_CALL.hex()}, got {actual_config_call.hex()}"
+        )
+    changed[
+        CONFIG_INIT_CALL_OFFSET : CONFIG_INIT_CALL_OFFSET + len(CONFIG_INIT_CALL)
+    ] = CONFIG_DEFAULTS_CALL
+    verify_near_call(changed, CONFIG_INIT_CALL_OFFSET, CONFIG_DEFAULTS_TARGET)
+    manifest_patches.append(
+        {
+            "label": "use safe in-memory HEN defaults without HDD config I/O",
+            "kind": "x86_64_near_call",
+            "file_offset": f"0x{CONFIG_INIT_CALL_OFFSET:x}",
+            "target_file_offset": f"0x{CONFIG_DEFAULTS_TARGET:x}",
+            "old_hex": CONFIG_INIT_CALL.hex(),
+            "new_hex": CONFIG_DEFAULTS_CALL.hex(),
+        }
+    )
+
     inner_branches = (
         (
             INNER_USERLAND_PATCH_GATE_OFFSET,
@@ -268,6 +397,98 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
                 "target_file_offset": f"0x{target:x}",
                 "old_hex": old_bytes.hex(),
                 "new_hex": new_bytes.hex(),
+            }
+        )
+
+    outer_bypasses = (
+        (
+            CONFIG_REFRESH_GATE_OFFSET,
+            "skip first-run config notification and delay",
+            CONFIG_REFRESH_GATE,
+            CONFIG_REFRESH_BYPASS,
+            CONFIG_REFRESH_TARGET,
+        ),
+        (
+            OUTER_OPTIONAL_BLOCK_OFFSET,
+            "skip unsupported optional 14.02 installer helpers",
+            OUTER_OPTIONAL_BLOCK,
+            OUTER_OPTIONAL_BYPASS,
+            OUTER_OPTIONAL_TARGET,
+        ),
+        (
+            PRX_UPLOAD_GATE_OFFSET,
+            "skip unused plugin PRX upload",
+            PRX_UPLOAD_GATE,
+            PRX_UPLOAD_BYPASS,
+            PRX_UPLOAD_TARGET,
+        ),
+    )
+    for offset, label, old_bytes, new_bytes, target in outer_bypasses:
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        verify_near_jump(changed, offset, target)
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "x86_64_near_jump",
+                "file_offset": f"0x{offset:x}",
+                "target_file_offset": f"0x{target:x}",
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+            }
+        )
+
+    fself_context_fixes = (
+        (
+            FSELF_SEGMENT_CONTEXT_OFFSET,
+            "recover 14.02 SELF segment context from caller R14",
+            FSELF_SEGMENT_CONTEXT,
+            FSELF_SEGMENT_CONTEXT_FIX,
+            "mov rdi, r14; nop",
+        ),
+        (
+            FSELF_BLOCK_CONTEXT_OFFSET,
+            "recover 14.02 SELF block context from saved caller R15",
+            FSELF_BLOCK_CONTEXT,
+            FSELF_BLOCK_CONTEXT_FIX,
+            "mov rdi, qword ptr [rbp - 8]",
+        ),
+    )
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    for offset, label, old_bytes, new_bytes, expected_asm in fself_context_fixes:
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        decoded = list(decoder.disasm(new_bytes, offset))
+        rendered = "; ".join(
+            instruction.mnemonic
+            + (" " + instruction.op_str if instruction.op_str else "")
+            for instruction in decoded
+        )
+        if sum(instruction.size for instruction in decoded) != len(new_bytes):
+            raise ValueError(f"{label} does not decode completely")
+        if rendered != expected_asm:
+            raise ValueError(
+                f"{label} decoded unexpectedly: {rendered!r}, "
+                f"expected {expected_asm!r}"
+            )
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "x86_64_context_recovery",
+                "file_offset": f"0x{offset:x}",
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+                "new_assembly": rendered,
             }
         )
 
@@ -332,15 +553,17 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     if len(result) != INPUT_SIZE or sha256(result) != OUTPUT_SHA256:
         raise ValueError("patched output does not match its pinned SHA-256")
     expected_changed = {
-        0x18D6,
-        0x18D7,
+        0x7C6, 0x7CE, 0x7D8,
+        0x18D6, 0x18D7,
+        0x468D, 0x468E,
+        0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
+        0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
+        0x52DA, 0x52DB, 0x52DC, 0x52DF,
         *range(0x53AC, 0x53B1),
         *range(0x5519, 0x5522),
-        0xBD8E,
-        0xBD9C,
-        0x10C6C,
-        0x10C6D,
-        0x10C84,
+        0xBD8E, 0xBD9C,
+        0xD686, 0xD687, 0xD688, 0xD689, 0xD8AC,
+        0x10C6C, 0x10C6D, 0x10C84,
     }
     actual_changed = {i for i, (a, b) in enumerate(zip(original, result)) if a != b}
     if actual_changed != expected_changed:
@@ -408,7 +631,8 @@ def main() -> None:
     manifest = {
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
-            "reduced core-HEN launch that avoids unported userland/plugin paths"
+            "core-HEN launch that avoids unsupported optional and "
+            "unported userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
@@ -424,15 +648,17 @@ def main() -> None:
         "patches": patches,
         "changed_byte_offsets": [f"0x{offset:x}" for offset in sorted(
             {
-                0x18D6,
-                0x18D7,
+                0x7C6, 0x7CE, 0x7D8,
+                0x18D6, 0x18D7,
+                0x468D, 0x468E,
+                0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
+                0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
+                0x52DA, 0x52DB, 0x52DC, 0x52DF,
                 *range(0x53AC, 0x53B1),
                 *range(0x5519, 0x5522),
-                0xBD8E,
-                0xBD9C,
-                0x10C6C,
-                0x10C6D,
-                0x10C84,
+                0xBD8E, 0xBD9C,
+                0xD686, 0xD687, 0xD688, 0xD689, 0xD8AC,
+                0x10C6C, 0x10C6D, 0x10C84,
             }
         )],
         "preserved_1400_instruction_file_offset": "0x25d2",
@@ -446,10 +672,13 @@ def main() -> None:
         ],
         "scope_limit": (
             "The SETLOGIN target, sceSblACMgrGetPathId, and "
-            "RsaesPkcs1v15Dec2048CRT are corrected. Jailbreak plus FSELF/FPKG "
-            "kernel hooks remain enabled. Unverified process/UI patches, plugin "
-            "hooks and injection, and the ShellUI/PartyDaemon restart are "
-            "skipped; hardware validation remains required."
+            "RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF "
+            "mailbox hooks recover their context from the caller's live "
+            "registers. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. "
+            "HDD config I/O, unsupported optional installer helpers, unverified "
+            "process/UI patches, plugin hooks and upload, and the "
+            "ShellUI/PartyDaemon restart are skipped; hardware validation "
+            "remains required."
         ),
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")

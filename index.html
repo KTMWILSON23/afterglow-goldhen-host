@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PS4 14.02 debug.bin one-shot host</title>
+  <title>PS4 14.02 corrected HEN host</title>
   <style>
     body { margin: 0; background: #0a1020; color: #e9f1ff;
       font: 18px/1.5 Arial, sans-serif; }
@@ -22,14 +22,14 @@
 </head>
 <body>
   <main class="content">
-    <h1>PS4 14.02: reduced HEN launch</h1>
-    <p>This is one real HEN launch attempt. It keeps the jailbreak and core
-      package-loading hooks, but avoids the unported menu and plugin writes
-      that froze the previous build.</p>
+    <h1>PS4 14.02: corrected HEN launch</h1>
+    <p>This is the real HEN launch. It corrects the 14.02 SELF context bug,
+      keeps the core package-loading hooks, and avoids unsupported menu,
+      plugin, config, and restart paths.</p>
     <p id="count">Checking launch status...</p>
     <small>A kernel panic can power off the console. After any attempt, fully
       power it off before another one.</small>
   </main>
-  <script src="./launch.js?v=debug1402p"></script>
+  <script src="./launch.js?v=hen1402r1"></script>
 </body>
 </html>
