@@ -8,10 +8,10 @@ configuration copies in both the user wrapper and the syscall-11 kernel
 callback, and replaces the callback's imported libc buffer operations with
 scalar loops. This removes vector/FPU and userland-library execution from the
 install-payload kernel path. It retains the FSELF/FPKG kernel hooks, but
-bypasses unsupported optional installer actions, the unported 14.00-derived
-userland patch table, plugin hooks, optional ShellCore plugin-loader injection,
-and deliberate ShellUI restart. Those paths are the first known unsafe writes
-on 14.02. It does not prove the remaining HEN runtime on hardware.
+bypasses the redundant outer jailbreak/kernel-patch callbacks, unsupported
+optional installer actions, the unported 14.00-derived userland patch table,
+plugin hooks, optional ShellCore plugin-loader injection, and deliberate
+ShellUI restart. It does not prove the remaining HEN runtime on hardware.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "525867736cfefad7a946dc006a09c3764440b88fc38384b81ab28e727ccdd489"
+OUTPUT_SHA256 = "9897135b31bfd0eecafb770e2bb4a6b720de47e18c84e01314294592c34c9515"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -240,6 +240,40 @@ OUTER_STAGE_PATCHES = (
 OUTER_STAGE_CHANGED_OFFSETS = frozenset(
     offset + index
     for offset, old_bytes, new_bytes in OUTER_STAGE_PATCHES
+    for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
+    if old_byte != new_byte
+)
+
+# Afterglow has already installed the verified 14.02 host patches and changed
+# this WebProcess to uid 0 before starting the HEN thread. Re-entering HEN's
+# older generic jailbreak and installer patch callbacks is redundant and is
+# the only remaining outer path before install_payload. Skip both calls while
+# retaining the firmware check, installed marker check, config and core payload.
+OUTER_JAILBREAK_CALL_OFFSET = 0x452C
+OUTER_JAILBREAK_CALL = bytes.fromhex("e8ff540000")
+OUTER_JAILBREAK_BYPASS = bytes.fromhex("9090909090")
+OUTER_INSTALL_PATCHES_CALL_OFFSET = 0x4682
+OUTER_INSTALL_PATCHES_CALL = bytes.fromhex("e837fcffff")
+OUTER_INSTALL_PATCHES_BYPASS = bytes.fromhex("9090909090")
+OUTER_PREINSTALL_BYPASSES = (
+    (
+        OUTER_JAILBREAK_CALL_OFFSET,
+        "skip redundant outer HEN jailbreak callback",
+        OUTER_JAILBREAK_CALL,
+        OUTER_JAILBREAK_BYPASS,
+        0x9A30,
+    ),
+    (
+        OUTER_INSTALL_PATCHES_CALL_OFFSET,
+        "skip redundant outer HEN kernel patch callback",
+        OUTER_INSTALL_PATCHES_CALL,
+        OUTER_INSTALL_PATCHES_BYPASS,
+        0x42BE,
+    ),
+)
+OUTER_PREINSTALL_CHANGED_OFFSETS = frozenset(
+    offset + index
+    for offset, _, old_bytes, new_bytes, _ in OUTER_PREINSTALL_BYPASSES
     for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
     if old_byte != new_byte
 )
@@ -516,6 +550,32 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             ),
         }
     )
+
+    for offset, label, old_bytes, new_bytes, target in OUTER_PREINSTALL_BYPASSES:
+        if len(old_bytes) != len(new_bytes):
+            raise ValueError(f"{label} changes the exact-image size")
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"{label} differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        verify_near_call(original, offset, target)
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        manifest_patches.append(
+            {
+                "label": label,
+                "kind": "x86_64_nop_call",
+                "file_offset": f"0x{offset:x}",
+                "old_target_file_offset": f"0x{target:x}",
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+                "reason": (
+                    "Afterglow already installed the verified 14.02 kernel "
+                    "patches and jailbroke the WebProcess"
+                ),
+            }
+        )
 
     scalar_kernel_copies = (
         (
@@ -870,6 +930,7 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         *range(0x42FF, 0x430A),
         *range(0x430B, 0x433C),
         *OUTER_STAGE_CHANGED_OFFSETS,
+        *OUTER_PREINSTALL_CHANGED_OFFSETS,
         0x468D, 0x468E,
         0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
         0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -948,8 +1009,8 @@ def main() -> None:
             "offline correction of three proven 14.02 payload offsets and a "
             "core-HEN launch that removes AVX from the full install-payload "
             "path, replaces ring-0 imported libc buffer calls, records the "
-            "outer handoff stage, and avoids unsupported optional and unported "
-            "userland/plugin paths"
+            "outer handoff stage, skips redundant outer jailbreak/patch callbacks, "
+            "and avoids unsupported optional and unported userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
@@ -973,6 +1034,7 @@ def main() -> None:
                 *range(0x42FF, 0x430A),
                 *range(0x430B, 0x433C),
                 *OUTER_STAGE_CHANGED_OFFSETS,
+                *OUTER_PREINSTALL_CHANGED_OFFSETS,
                 0x468D, 0x468E,
                 0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
                 0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -1004,6 +1066,8 @@ def main() -> None:
             "calls are replaced with exact scalar clear/copy loops. "
             "Versioned userland markers bracket the outer install_payload call "
             "without writing diagnostic state into kernel text. "
+            "The outer jailbreak and generic kernel-patch callbacks are skipped "
+            "because Afterglow already completed those operations. "
             "HDD config I/O, unsupported optional installer helpers, unverified "
             "process/UI patches, plugin hooks and upload, and the "
             "ShellUI/PartyDaemon restart are skipped; hardware validation "

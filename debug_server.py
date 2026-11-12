@@ -21,7 +21,7 @@ LOG_DIR = ROOT.parent / "debug-captures"
 DEBUG_HASHES = {
     "debug.bin": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
     "debug-1402-fixed.bin": "f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a",
-    "hen-1402-core.bin": "525867736cfefad7a946dc006a09c3764440b88fc38384b81ab28e727ccdd489",
+    "hen-1402-core.bin": "9897135b31bfd0eecafb770e2bb4a6b720de47e18c84e01314294592c34c9515",
 }
 DEBUG_SIZE = 498720
 FILES = frozenset({
