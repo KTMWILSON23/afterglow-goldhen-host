@@ -1,0 +1,37 @@
+{
+  "changed_byte_offsets": [
+    "0x18d6",
+    "0x18d7"
+  ],
+  "decoder": {
+    "architecture": "x86_64",
+    "name": "Capstone",
+    "version": "5.0.7"
+  },
+  "input": {
+    "path": "debug.bin",
+    "sha256": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
+    "size": 498720
+  },
+  "output": {
+    "path": "debug-1402-fixed.bin",
+    "sha256": "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
+    "size": 498720
+  },
+  "patches": [
+    {
+      "displacement_file_offset": "0x18d6",
+      "instruction_file_offset": "0x18d3",
+      "label": "SETLOGIN LEA 14.02 branch",
+      "new_instruction_hex": "4c8d902c4e3900",
+      "new_rva": "0x394e2c",
+      "old_instruction_hex": "4c8d90bc4a3900",
+      "old_rva": "0x394abc"
+    }
+  ],
+  "preserved_1400_instruction_file_offset": "0x25d2",
+  "purpose": "offline SETLOGIN LEA displacement correction only",
+  "scope_limit": "No other firmware offsets or HEN kernel writes are validated by this patch.",
+  "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
+  "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
+}

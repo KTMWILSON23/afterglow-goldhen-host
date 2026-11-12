@@ -1,66 +1,57 @@
-/*
-  launch.js — NanospeedGamer landing page controller
-  Countdown → auto-redirect to exploit chain, or manual start via button.
-  Referrer guard: only fires when reached from index.html in the same origin.
-*/
-
+/* One manual attempt per acknowledged cold boot. The exploit page verifies
+   this same-tab handoff again before it initializes WebKit. */
 (function () {
   "use strict";
-
-  const COUNTDOWN_SEC = 5;
-  const DEST = "launch.html?v=1402s&log=1&afterglow=run&mode=kpstep&g=drain:16&g=drainsz:0x4000";
-
-  const countEl = document.getElementById("count"); // <p class="status" id="count">
+  const DEST = "launch.html?v=1402s&log=1&afterglow=run&payload=debug-1402-fixed.bin&retry=0&g=drain:16&g=drainsz:0x4000";
+  const LOCK = "debug-1402-attempted";
+  const TOKEN = "debug-1402-tab-token";
+  /* Keep the UI locked until the corrected payload and dynamic host path
+     have completed review together. */
+  const CANDIDATE_READY = false;
+  const count = document.getElementById("count");
   const content = document.querySelector(".content");
+  const button = document.createElement("button");
+  button.id = "startBtn";
+  button.textContent = "Start one corrected debug.bin attempt";
+  button.disabled = true;
+  if (content) content.appendChild(button);
 
-  function guardOk() {
-    return true; // key auth on index.html already protects the page
-  }
-
-  /* ── inject start button ─────────────────────────────────────────────── */
-  const btn = document.createElement("button");
-  btn.id = "startBtn";
-  btn.textContent = "START NOW";
-  btn.style.display = "none"; // hidden until guard passes
-  if (content) content.appendChild(btn);
-
-  /* ── go ──────────────────────────────────────────────────────────────── */
-  function go() {
-    if (countEl) countEl.textContent = "[ EXECUTE ]";
-    if (btn) btn.disabled = true;
-    location.href = DEST;
-  }
-
-  /* ── blocked by referrer guard ───────────────────────────────────────── */
-  if (!guardOk()) {
-    if (countEl) countEl.textContent = "[ ACCESS DENIED — NAVIGATE FROM ROOT ]";
-    return; // stop — session restore, do not fire
-  }
-
-  /* ── show button now that we're cleared ─────────────────────────────── */
-  btn.style.display = "";
-  btn.addEventListener("click", function () {
-    clearInterval(timer);
-    go();
-  });
-
-  /* ── countdown ───────────────────────────────────────────────────────── */
-  let remaining = COUNTDOWN_SEC;
-
-  function tick() {
-    if (countEl) {
-      countEl.textContent =
-        remaining > 0
-          ? "[ LAUNCHING IN " + remaining + "... ]"
-          : "[ EXECUTE ]";
+  function status(message) { if (count) count.textContent = message; }
+  function arm() {
+    if (!CANDIDATE_READY) {
+      status("Launch paused while the corrected 14.02 host is reviewed.");
+      return;
     }
-    if (remaining <= 0) {
-      clearInterval(timer);
-      go();
+    if (localStorage.getItem(LOCK)) {
+      status("Previous attempt recorded. Power off the PS4 completely before another attempt.");
+      const input = document.createElement("input");
+      input.placeholder = "Type COLD BOOT DONE";
+      input.setAttribute("aria-label", "Cold boot acknowledgement");
+      if (content) content.appendChild(input);
+      const unlock = document.createElement("button");
+      unlock.textContent = "Unlock after full power off";
+      if (content) content.appendChild(unlock);
+      unlock.onclick = function () {
+        if (input.value !== "COLD BOOT DONE") return;
+        localStorage.removeItem(LOCK);
+        if (input.parentNode) input.parentNode.removeChild(input);
+        if (unlock.parentNode) unlock.parentNode.removeChild(unlock);
+        status("Ready for one manual attempt. A kernel panic is possible.");
+        button.disabled = false;
+      };
+      return;
     }
-    remaining--;
+    status("Ready for one manual attempt. A kernel panic is possible.");
+    button.disabled = false;
   }
-
-  tick(); // show initial value immediately
-  var timer = setInterval(tick, 1000);
+  button.onclick = function () {
+    if (!CANDIDATE_READY || button.disabled || localStorage.getItem(LOCK)) return;
+    button.disabled = true;
+    const nonce = String(Date.now()) + "-" + String(Math.random()).slice(2);
+    sessionStorage.setItem(TOKEN, nonce);
+    localStorage.setItem(LOCK, nonce + ":started");
+    status("Starting one attempt; power off completely before trying again.");
+    location.assign(DEST + "&run=" + encodeURIComponent(nonce));
+  };
+  arm();
 })();

