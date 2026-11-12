@@ -118,7 +118,7 @@ const BOOTSTRAP_WINDOWS = [
 ];
 
 const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false,
-  pthread: null, taperSeed: false };
+  pthread: null, taperSeed: false, terminalReleaseAttempted: false };
 
 function host() {
   if (!STATE.ctx) throw new Error("afterglow: no host installed");
@@ -1176,6 +1176,7 @@ async function attempt(ctx, opts) {
   STATE.ctx = ctx;
   opts = opts || {};
   STATE.retry = false;
+  STATE.terminalReleaseAttempted = false;
   if (!CANDIDATE_READY) {
     say("[p] corrected 14.02 HEN launch paused pending host review");
     return false;
@@ -1712,7 +1713,8 @@ async function attempt(ctx, opts) {
   /* ---- Load corrected HEN payload ---- */
   say("[p] Attempting to start corrected HEN as a thread");
   try {
-    iface.payload = await loadPayload("hen-1402-core.bin", henBytes);
+    iface.payload = await loadPayload("hen-1402-core.bin", henBytes, iface.defused);
+    if (STATE.terminalReleaseAttempted) return iface;
     if (iface.payload) {
       say("[p] pthread_create returned success; HEN runtime remains unconfirmed");
     } else {
@@ -1783,7 +1785,7 @@ function resolvePthreadCreate() {
   return fn;
 }
 
-async function loadPayload(url, vorab) {
+async function loadPayload(url, vorab, defused) {
   const c = host();
   let blob = vorab || null;
   if (blob === null) {
@@ -1848,6 +1850,16 @@ async function loadPayload(url, vorab) {
   const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
   const handle = qAt(thr, 0);
   const started = rc === 0 && (handle.hi >>> 0) > 0;
+  if (started && defused === true && typeof c.releaseAfterPayloadStart === "function") {
+    STATE.terminalReleaseAttempted = true;
+    let released = null;
+    try {
+      released = c.releaseAfterPayloadStart({
+        payload: true, defused: true, rc: rc, handle: text(handle),
+      });
+    } catch (_) {}
+    return started;
+  }
   await checkpoint("pthread-returned", "rc=" + rc + " handle=" + text(handle));
   say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
       + (started ? " -- running" : " -- did NOT start"));
@@ -1873,5 +1885,6 @@ export async function runAfterglow(ctx, opts) {
     STATE.retry = false;
     STATE.pthread = null;
     STATE.taperSeed = false;
+    STATE.terminalReleaseAttempted = false;
   }
 }

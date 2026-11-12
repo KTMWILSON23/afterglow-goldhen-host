@@ -33,6 +33,10 @@ FILES = frozenset({
 RUN_RE = re.compile(r"^[0-9]{8,16}-[0-9]{6,20}$")
 TAG_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 LOG_LOCK = threading.Lock()
+ATTEMPT_LOCK = threading.Lock()
+ATTEMPT_USED_HTML = b"""<!doctype html><meta charset=utf-8><title>Attempt already used</title>
+<body style='background:#08152b;color:#eef;font:22px Arial;padding:10vh'>
+<h1>Attempt already used</h1><p>Fully power off the PS4. Do not retry on this boot.</p></body>"""
 
 
 def verified_debug_bytes(name):
@@ -44,6 +48,8 @@ def verified_debug_bytes(name):
 
 class Handler(BaseHTTPRequestHandler):
     peer = "192.168.1.104"
+    attempt_claimed = False
+    attempt_run = None
 
     def log_message(self, fmt, *args):
         print("%s %s" % (self.address_string(), fmt % args), flush=True)
@@ -79,6 +85,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             path = "/index.html"
+        if path == "/launch.html" and self.command == "GET":
+            args = parse_qs(parsed.query, keep_blank_values=True)
+            if args.get("afterglow", [""])[0] == "run":
+                run = args.get("run", [""])[0]
+                if not RUN_RE.fullmatch(run):
+                    self.reply(400, b"Invalid launch token")
+                    return
+                claimed_by = None
+                with ATTEMPT_LOCK:
+                    if Handler.attempt_claimed:
+                        claimed_by = Handler.attempt_run
+                    else:
+                        Handler.attempt_claimed = True
+                        Handler.attempt_run = run
+                if claimed_by is not None:
+                    print("Rejected repeat launch %s; claimed by %s" %
+                          (run, claimed_by), flush=True)
+                    self.reply(200, ATTEMPT_USED_HTML, "text/html; charset=utf-8")
+                    return
+                print("Claimed one launch for %s" % run, flush=True)
         name = path[1:]
         if name not in FILES:
             self.reply(404, b"Not found")
