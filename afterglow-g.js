@@ -1156,7 +1156,7 @@ async function attempt(ctx, opts) {
     say("corrected HEN launch is restricted to firmware 14.02");
     return false;
   }
-  say("afterglow -- one 14.02 attempt to start the corrected HEN build");
+  say("afterglow -- starting a 14.02 HEN shot");
   const henBytes = await fetchBytes("hen-1402-core.bin", "p");
   if (!henBytes || henBytes.length !== HEN_BIN.length ||
       sha256Hex(henBytes) !== HEN_BIN.sha256) {
@@ -1180,6 +1180,7 @@ async function attempt(ctx, opts) {
   }
   say("  pinned to core " + pin.core + " of [" + pin.allowed + "]");
 
+  let kernelAlreadyOpen = false;
   {
     const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
     if (m0.i32 !== -1 && sc(S.mprotect, v(m0.lo, m0.hi), 0x4000, 7).i32 === 0) {
@@ -1211,7 +1212,7 @@ async function attempt(ctx, opts) {
       await checkpoint("HEN-MARKER-MISSING",
         "open errno=" + markerErrno + "; pre=" + enteredInstall +
         "; post=" + returnedInstall + "; " + stageReport);
-      return false;
+      kernelAlreadyOpen = true;
     }
   }
 
@@ -1239,6 +1240,18 @@ async function attempt(ctx, opts) {
       return false;
     }
     gad[name] = at;
+  }
+
+  if (kernelAlreadyOpen) {
+    say("[p] kernel is already open -- starting another HEN shot directly");
+    const payload = await loadPayload("hen-1402-core.bin", henBytes, true);
+    return {
+      payload: payload === true,
+      threadStarted: STATE.payloadThreadStarted === true,
+      installed: STATE.henInstalled === true,
+      defused: true,
+      alreadyOpen: true,
+    };
   }
 
   /* Choose the descriptor strategy before the first kernel shot. The browser
@@ -1725,7 +1738,7 @@ async function attempt(ctx, opts) {
     say("[p] Error starting corrected HEN: " + (e && e.message));
   }
 
-  say("[p] one-shot finished; kernel patches " + done + "/" + PATCHES.length +
+  say("[p] HEN shot finished; kernel patches " + done + "/" + PATCHES.length +
       "; pthread start=" + !!iface.payload + "; HEN status unconfirmed");
   return iface;
 }

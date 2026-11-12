@@ -1,7 +1,7 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r9";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r9";
-import { int64 } from "./int64.js?v=hen1402r9";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r9";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r10";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r10";
+import { int64 } from "./int64.js?v=hen1402r10";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r10";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -10,6 +10,10 @@ let passCount = 0,
   failCount = 0;
 let armedEver = false;
 const params = new URLSearchParams(location.search);
+const UNLIMITED_MODE = (function () {
+  try { return localStorage.getItem("hen-1402-unlimited") === "1"; }
+  catch (_) { return false; }
+})();
 
 /* The retry notice. Two things lead here: the chain throws, or it stalls
    without a word. The watchdog covers the second case. It cannot fire when
@@ -32,6 +36,34 @@ function showRetry() {
   if (retryShown) return;
   retryShown = true;
   showNotice("exploit failed - please retry (reopen browser)");
+}
+
+let unlimitedRetryScheduled = false;
+function scheduleUnlimitedShot(reason) {
+  if (!UNLIMITED_MODE || unlimitedRetryScheduled) return false;
+  unlimitedRetryScheduled = true;
+  const button = document.createElement("button");
+  button.textContent = "Run another HEN shot now";
+  button.style.cssText =
+    "display:block;margin:14px 0;padding:12px 18px;font-size:18px;" +
+    "background:#85e1c7;color:#07141a;border:0;border-radius:7px";
+  let fired = false;
+  button.onclick = function () {
+    if (fired) return;
+    fired = true;
+    const nonce = String(Date.now()) + "-" + String(Math.random()).slice(2);
+    try {
+      sessionStorage.setItem("hen-1402-core-tab-token", nonce);
+      localStorage.setItem("hen-1402-core-attempted", nonce + ":started");
+    } catch (_) {}
+    const next = new URL(location.href);
+    next.searchParams.set("run", nonce);
+    location.replace(next.href);
+  };
+  (outEl || document.body).appendChild(button);
+  showNotice("Unlimited mode: another HEN shot starts automatically in 2 seconds (" + reason + ").");
+  setTimeout(function () { try { button.click(); } catch (_) {} }, 2000);
+  return true;
 }
 
 const WATCHDOG_MS = 45000;
@@ -67,6 +99,7 @@ const HANDOFF_OK = (function () {
   const run = params.get("run") || "";
   if (!/^[0-9]+-[0-9]+$/.test(run)) return false;
   try {
+    if (UNLIMITED_MODE) return true;
     const good = sessionStorage.getItem("hen-1402-core-tab-token") === run &&
       localStorage.getItem("hen-1402-core-attempted") === run + ":started";
     sessionStorage.removeItem("hen-1402-core-tab-token");
@@ -92,8 +125,7 @@ const SENT_HOME = (function () {
     const msgEl = document.getElementById("msg");
     if (msgEl) {
       msgEl.textContent =
-        "This one-shot page was not opened from the Start button. " +
-        "Power off completely before another attempt.";
+        "Open the start page once to enable unlimited HEN attempts.";
     }
   } catch (e) {}
   /* replace(), not assign(): the refused page must not stay in the history,
@@ -1023,7 +1055,7 @@ let allDone = false,
          (afterglow=probe) fires no trigger and patches nothing, so a restored
          page may run that. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r9");
+        const ag = await import("./afterglow-g.js?v=hen1402r10");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
@@ -1082,11 +1114,11 @@ let allDone = false,
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
       }
       allDone = true;
-      mark("ONE-SHOT-END", henInstalled
+      mark("SHOT-END", henInstalled
         ? "HEN completion marker confirmed; HEN is installed on this boot"
         : payloadRunning
-          ? "pthread_create returned; HEN status unconfirmed. Leave result on screen"
-          : "No payload thread confirmed. Leave page open and fully power off PS4 before retry");
+          ? "pthread_create returned; HEN status unconfirmed"
+          : "No payload thread confirmed; preparing another shot");
       if (cleanupSafe) {
         const released = terminalReleaseAttempted
           ? terminalReleaseResult
@@ -1110,8 +1142,7 @@ let allDone = false,
         return;
       }
       finishUI(payloadRunning);
-      // Leave the actual outcome visible. The consumed same-tab token keeps a
-      // browser-restored launch page from firing automatically.
+      if (!henInstalled) scheduleUnlimitedShot("HEN is not installed yet");
       return;
     }
     mark("JB-END", "afterglow is the kernel stage -- without afterglow= nothing runs here");
@@ -1125,5 +1156,6 @@ let allDone = false,
     // NOTHING -- no apm unit spent, no kernel byte written. Reopening the
     // browser is enough; rebooting the console would waste a cycle.
     showRetry();
+    scheduleUnlimitedShot("the browser stage stopped");
   }
 })();
