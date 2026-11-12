@@ -24,7 +24,7 @@ import { sha256Hex } from "./sha256.js";
 
 const DEBUG_BIN = {
   length: 498720,
-  sha256: "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
+  sha256: "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b",
 };
 const CANDIDATE_READY = true;
 

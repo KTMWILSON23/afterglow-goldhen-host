@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 LOG_DIR = ROOT.parent / "debug-captures"
 DEBUG_HASHES = {
     "debug.bin": "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5",
-    "debug-1402-fixed.bin": "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
+    "debug-1402-fixed.bin": "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b",
 }
 DEBUG_SIZE = 498720
 FILES = frozenset({

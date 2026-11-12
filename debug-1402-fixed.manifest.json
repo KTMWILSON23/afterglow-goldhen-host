@@ -1,7 +1,10 @@
 {
   "changed_byte_offsets": [
     "0x18d6",
-    "0x18d7"
+    "0x18d7",
+    "0x10c6c",
+    "0x10c6d",
+    "0x10c84"
   ],
   "decoder": {
     "architecture": "x86_64",
@@ -15,23 +18,58 @@
   },
   "output": {
     "path": "debug-1402-fixed.bin",
-    "sha256": "5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083",
+    "sha256": "89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b",
     "size": 498720
   },
   "patches": [
     {
+      "base": "IA32_LSTAR",
+      "base_rva": "0x1c0",
       "displacement_file_offset": "0x18d6",
       "instruction_file_offset": "0x18d3",
+      "kind": "x86_64_lea_displacement",
       "label": "SETLOGIN LEA 14.02 branch",
+      "new_displacement": "0x394e2c",
       "new_instruction_hex": "4c8d902c4e3900",
-      "new_rva": "0x394e2c",
+      "new_target_rva": "0x394fec",
+      "old_displacement": "0x394abc",
       "old_instruction_hex": "4c8d90bc4a3900",
-      "old_rva": "0x394abc"
+      "old_target_rva": "0x394c7c"
+    },
+    {
+      "file_offset": "0x10c6c",
+      "kind": "embedded_fw_offsets_u32",
+      "label": "sceSblACMgrGetPathId_addr",
+      "new_hex_le": "503c3b00",
+      "new_rva": "0x003b3c50",
+      "old_hex_le": "c03b3b00",
+      "old_rva": "0x003b3bc0"
+    },
+    {
+      "file_offset": "0x10c84",
+      "kind": "embedded_fw_offsets_u32",
+      "label": "RsaesPkcs1v15Dec2048CRT_addr",
+      "new_hex_le": "d0c32100",
+      "new_rva": "0x0021c3d0",
+      "old_hex_le": "e0c32100",
+      "old_rva": "0x0021c3e0"
     }
   ],
   "preserved_1400_instruction_file_offset": "0x25d2",
-  "purpose": "offline SETLOGIN LEA displacement correction only",
-  "scope_limit": "No other firmware offsets or HEN kernel writes are validated by this patch.",
+  "preserved_table_values": [
+    {
+      "file_offset": "0x10c80",
+      "label": "sceSblAuthMgrVerifyHeader_addr",
+      "rva": "0x00640930"
+    },
+    {
+      "file_offset": "0x10c98",
+      "label": "sceSblPfsSetKeys_addr",
+      "rva": "0x006276f0"
+    }
+  ],
+  "purpose": "offline correction of three proven 14.02 payload offsets",
+  "scope_limit": "Only the SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected; hardware validation remains required.",
   "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
   "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 }

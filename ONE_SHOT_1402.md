@@ -17,11 +17,22 @@ snapshot, keeps the 200-slot guard, and logs the header fields.
 
 The repository's original `debug.bin` is retained unchanged. Its 14.02
 branch used the 14.00 SETLOGIN instruction address and would corrupt a live
-14.02 instruction. `tools/patch-debug-1402.py` verifies the original SHA-256
-and instruction, corrects only file bytes `0x18d6` and `0x18d7`, and verifies
-the resulting `debug-1402-fixed.bin` SHA-256
-`5862bf202a7c5f146820fd6354330dd07b1c6bdbe6e7f939ba71692b5410d083`.
-This is an experimental HEN payload, not GoldHEN.
+14.02 instruction. The first complete launch proved that the browser exploit,
+guarded kernel writes, privilege changes, payload copy, and payload thread all
+completed, but the PS4 UI then froze inside HEN startup. Offline comparison
+with the 14.00 source and decrypted 14.02 kernel found two more definite bad
+entries in the embedded 14.02 table: `sceSblACMgrGetPathId` pointed at an
+unrelated function with a different argument contract, and
+`RsaesPkcs1v15Dec2048CRT` pointed at the next, different wrapper.
+
+`tools/patch-debug-1402.py` verifies the original SHA-256, exact instruction,
+and exact old table values. It corrects only file bytes `0x18d6`, `0x18d7`,
+`0x10c6c`, `0x10c6d`, and `0x10c84`, then verifies the resulting
+`debug-1402-fixed.bin` SHA-256
+`89538354a878afeade624276f928ff1d4f6d7d00baab2f1b6784bfa9f02ffc0b`.
+The nuanced `sceSblAuthMgrVerifyHeader` underlying-body target and the valid
+full-entry `sceSblPfsSetKeys` target are deliberately preserved. This remains
+an experimental HEN payload, not GoldHEN, until confirmed on hardware.
 
 `debug_server.py` serves only to the configured PS4 IP on a new local port,
 adds no-store headers, verifies both binary hashes, and keeps checkpoint logs
