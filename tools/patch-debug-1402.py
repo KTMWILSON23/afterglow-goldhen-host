@@ -3,10 +3,11 @@
 
 This is an offline, exact-image byte patch. It corrects the SETLOGIN target
 and two embedded kernel function addresses whose 14.02 counterparts were
-verified against the decrypted kernel. It also replaces two compiler-emitted
-AVX configuration copies that execute inside the syscall-11 kernel callback;
-the callback does not enter an FPU context, so those vector instructions can
-fault the calling WebProcess. It retains the FSELF/FPKG kernel hooks, but
+verified against the decrypted kernel. It replaces compiler-emitted AVX
+configuration copies in both the user wrapper and the syscall-11 kernel
+callback, and replaces the callback's imported libc buffer operations with
+scalar loops. This removes vector/FPU and userland-library execution from the
+install-payload kernel path. It retains the FSELF/FPKG kernel hooks, but
 bypasses unsupported optional installer actions, the unported 14.00-derived
 userland patch table, plugin hooks, optional ShellCore plugin-loader injection,
 and deliberate ShellUI restart. Those paths are the first known unsafe writes
@@ -46,7 +47,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "140bace69df37f2518d03e528c42872192abac5cc15a9df6301de96f95b47efc"
+OUTPUT_SHA256 = "525867736cfefad7a946dc006a09c3764440b88fc38384b81ab28e727ccdd489"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -104,6 +105,55 @@ KERNEL_CONFIG_COPY_OUT_SCALAR = bytes.fromhex(
     "909090909090"
 )
 
+# Do not call userland libc while syscall 11 is executing this callback in
+# ring 0. Even after removing explicit AVX, the imported memset/memcpy bodies
+# may select SIMD implementations. These exact-length scalar loops preserve
+# the 0x4000-byte clear and payload_size-byte copy without leaving the callback.
+KERNEL_PAYLOAD_ZERO_OFFSET = 0x4217
+KERNEL_PAYLOAD_ZERO = bytes.fromhex("31f64c89f7ba00400000ff15a15d0700")
+KERNEL_PAYLOAD_ZERO_SCALAR = bytes.fromhex("4c89f731c0b900400000fcf3aa909090")
+KERNEL_PAYLOAD_COPY_OFFSET = 0x4227
+KERNEL_PAYLOAD_COPY = bytes.fromhex("488b9578ffffff4c89fe4c89f7ff15865d0700")
+KERNEL_PAYLOAD_COPY_SCALAR = bytes.fromhex(
+    "488b8d78ffffff4c89fe4c89f7fcf3a4909090"
+)
+KERNEL_LIBC_PATCHES = (
+    (
+        KERNEL_PAYLOAD_ZERO_OFFSET,
+        KERNEL_PAYLOAD_ZERO,
+        KERNEL_PAYLOAD_ZERO_SCALAR,
+        ("mov", "xor", "mov", "cld", "rep stosb", "nop", "nop", "nop"),
+    ),
+    (
+        KERNEL_PAYLOAD_COPY_OFFSET,
+        KERNEL_PAYLOAD_COPY,
+        KERNEL_PAYLOAD_COPY_SCALAR,
+        ("mov", "mov", "mov", "cld", "rep movsb", "nop", "nop", "nop"),
+    ),
+)
+KERNEL_LIBC_CHANGED_OFFSETS = frozenset(
+    offset + index
+    for offset, old_bytes, new_bytes, _ in KERNEL_LIBC_PATCHES
+    for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
+    if old_byte != new_byte
+)
+
+# Remove the same compiler-generated vector copy from the user-side wrapper
+# immediately before syscall 11. This constructs the identical payload-info
+# object on the existing 0x48-byte stack frame, then calls the same callback
+# through the same kexec wrapper.
+USER_CONFIG_WRAPPER_OFFSET = 0x42FF
+USER_CONFIG_WRAPPER = bytes.fromhex(
+    "c5fe6f03c5fa6f4b1c668904244889e6488d054a770000"
+    "488d3dd1f6ffff488944243048c744243808800000"
+    "c5fe7f442404c5fa7f4c2420e8f2220000"
+)
+USER_CONFIG_WRAPPER_SCALAR = bytes.fromhex(
+    "668904244889de488d7c2404b92c000000fcf3a4"
+    "488d0546770000488944243048c744243808800000"
+    "4889e6488d3dbcf6ffffe8f72200009090909090"
+)
+
 # The 14.02 source archive copied its userland process-patch RVAs from 14.00.
 # Skip that block and plugin syscall installation while retaining the FSELF and
 # FPKG kernel hooks that execute immediately before these branches.
@@ -153,6 +203,46 @@ OUTER_OPTIONAL_BLOCK_OFFSET = 0x4AEF
 OUTER_OPTIONAL_BLOCK = bytes.fromhex("837c242800")
 OUTER_OPTIONAL_BYPASS = bytes.fromhex("e91a040000")
 OUTER_OPTIONAL_TARGET = 0x4F0E
+
+# Wrap the outer install_payload call with two versioned /user/temp markers.
+# If WebProcess is replaced during the handoff, the reloaded host can report
+# whether the wrapper was entered and whether it returned. The trampoline lives
+# in the optional-helper block that is bypassed above; it does not touch kernel
+# text or alter the install_payload ABI.
+OUTER_STAGE_CALL_OFFSET = 0x4F13
+OUTER_STAGE_CALL = bytes.fromhex("e8d0f3ffff")
+OUTER_STAGE_CALL_PATCH = bytes.fromhex("e868fcffff")
+OUTER_STAGE_TRAMPOLINE_OFFSET = 0x4B80
+OUTER_STAGE_TRAMPOLINE = bytes.fromhex(
+    "550000be00020000f3ab4889efff15b553070031c9"
+    "bf590200004189c44889ea31c0be07"
+)
+OUTER_STAGE_TRAMPOLINE_PATCH = bytes.fromhex(
+    "57488d3d38000000e862180000488b3c24e852f7ffff"
+    "488d3d43000000e84d1800005fc3"
+)
+OUTER_STAGE_PRE_OFFSET = 0x4BC0
+OUTER_STAGE_PRE = bytes.fromhex("0031c0e87bf7ffff837c242c000f84c7000000488b")
+OUTER_STAGE_PRE_PATCH = b"/user/temp/h14r9.pre\0"
+OUTER_STAGE_POST_OFFSET = 0x4BE0
+OUTER_STAGE_POST = bytes.fromhex("ac245003000041b9a00000004c8d0573f00000488d15")
+OUTER_STAGE_POST_PATCH = b"/user/temp/h14r9.post\0"
+OUTER_STAGE_PATCHES = (
+    (OUTER_STAGE_CALL_OFFSET, OUTER_STAGE_CALL, OUTER_STAGE_CALL_PATCH),
+    (
+        OUTER_STAGE_TRAMPOLINE_OFFSET,
+        OUTER_STAGE_TRAMPOLINE,
+        OUTER_STAGE_TRAMPOLINE_PATCH,
+    ),
+    (OUTER_STAGE_PRE_OFFSET, OUTER_STAGE_PRE, OUTER_STAGE_PRE_PATCH),
+    (OUTER_STAGE_POST_OFFSET, OUTER_STAGE_POST, OUTER_STAGE_POST_PATCH),
+)
+OUTER_STAGE_CHANGED_OFFSETS = frozenset(
+    offset + index
+    for offset, old_bytes, new_bytes in OUTER_STAGE_PATCHES
+    for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
+    if old_byte != new_byte
+)
 
 # Plugin loading is already disabled below. Avoid writing the unused PRX
 # bundle to /data/hen as well; the core FSELF/FPKG hooks do not need it.
@@ -313,6 +403,37 @@ def verify_scalar_kernel_copy(
         raise ValueError(f"vector instruction remains at 0x{offset:x}")
 
 
+def verify_outer_stage_trampoline(image: bytes | bytearray) -> None:
+    actual = bytes(
+        image[
+            OUTER_STAGE_TRAMPOLINE_OFFSET :
+            OUTER_STAGE_TRAMPOLINE_OFFSET + len(OUTER_STAGE_TRAMPOLINE_PATCH)
+        ]
+    )
+    if actual != OUTER_STAGE_TRAMPOLINE_PATCH:
+        raise ValueError("outer install-payload stage trampoline differs")
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    instructions = list(decoder.disasm(actual, OUTER_STAGE_TRAMPOLINE_OFFSET))
+    if sum(instruction.size for instruction in instructions) != len(actual):
+        raise ValueError("outer install-payload stage trampoline does not decode fully")
+    if tuple(instruction.mnemonic for instruction in instructions) != (
+        "push", "lea", "call", "mov", "call", "lea", "call", "pop", "ret",
+    ):
+        raise ValueError("outer install-payload stage trampoline decoded unexpectedly")
+    verify_near_call(image, OUTER_STAGE_CALL_OFFSET, OUTER_STAGE_TRAMPOLINE_OFFSET)
+    verify_near_call(image, 0x4B88, 0x63EF)
+    verify_near_call(image, 0x4B91, 0x42E8)
+    verify_near_call(image, 0x4B9D, 0x63EF)
+    if bytes(image[OUTER_STAGE_PRE_OFFSET : OUTER_STAGE_PRE_OFFSET + 21]) != (
+        OUTER_STAGE_PRE_PATCH
+    ):
+        raise ValueError("outer install-payload pre marker path differs")
+    if bytes(image[OUTER_STAGE_POST_OFFSET : OUTER_STAGE_POST_OFFSET + 22]) != (
+        OUTER_STAGE_POST_PATCH
+    ):
+        raise ValueError("outer install-payload post marker path differs")
+
+
 def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     if len(original) != INPUT_SIZE or sha256(original) != INPUT_SHA256:
         raise ValueError("input is not the exact published Akatsuki debug.bin")
@@ -332,6 +453,70 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
 
     changed = bytearray(original)
     manifest_patches: list[dict[str, object]] = []
+
+    actual_user_wrapper = bytes(
+        original[
+            USER_CONFIG_WRAPPER_OFFSET :
+            USER_CONFIG_WRAPPER_OFFSET + len(USER_CONFIG_WRAPPER)
+        ]
+    )
+    if actual_user_wrapper != USER_CONFIG_WRAPPER:
+        raise ValueError(
+            f"user install-payload wrapper differs at 0x{USER_CONFIG_WRAPPER_OFFSET:x}: "
+            f"expected {USER_CONFIG_WRAPPER.hex()}, got {actual_user_wrapper.hex()}"
+        )
+    changed[
+        USER_CONFIG_WRAPPER_OFFSET :
+        USER_CONFIG_WRAPPER_OFFSET + len(USER_CONFIG_WRAPPER)
+    ] = USER_CONFIG_WRAPPER_SCALAR
+    verify_scalar_kernel_copy(
+        changed,
+        USER_CONFIG_WRAPPER_OFFSET,
+        USER_CONFIG_WRAPPER_SCALAR,
+        (
+            "mov", "mov", "lea", "mov", "cld", "rep movsb", "lea", "mov",
+            "mov", "mov", "lea", "call",
+        ),
+    )
+    manifest_patches.append(
+        {
+            "label": "replace user install-payload AVX copy with scalar copy",
+            "kind": "x86_64_userland_scalar_copy",
+            "file_offset": f"0x{USER_CONFIG_WRAPPER_OFFSET:x}",
+            "length": len(USER_CONFIG_WRAPPER_SCALAR),
+            "old_hex": USER_CONFIG_WRAPPER.hex(),
+            "new_hex": USER_CONFIG_WRAPPER_SCALAR.hex(),
+            "copy_size": 44,
+            "reason": "remove the final vector operations from the install-payload path",
+        }
+    )
+
+    for offset, old_bytes, new_bytes in OUTER_STAGE_PATCHES:
+        if len(old_bytes) != len(new_bytes):
+            raise ValueError("outer stage marker patch changes the exact-image size")
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"outer stage marker source differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+    verify_outer_stage_trampoline(changed)
+    manifest_patches.append(
+        {
+            "label": "record outer install-payload entry and return",
+            "kind": "x86_64_userland_stage_trampoline",
+            "call_file_offset": f"0x{OUTER_STAGE_CALL_OFFSET:x}",
+            "trampoline_file_offset": f"0x{OUTER_STAGE_TRAMPOLINE_OFFSET:x}",
+            "pre_marker": OUTER_STAGE_PRE_PATCH[:-1].decode("ascii"),
+            "post_marker": OUTER_STAGE_POST_PATCH[:-1].decode("ascii"),
+            "reason": (
+                "make a WebProcess replacement report whether install_payload "
+                "was entered and whether it returned"
+            ),
+        }
+    )
+
     scalar_kernel_copies = (
         (
             KERNEL_CONFIG_COPY_IN_OFFSET,
@@ -372,6 +557,33 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
                 "new_hex": new_bytes.hex(),
                 "copy_size": 44,
                 "reason": "avoid AVX use in syscall-11 kernel context without fpu_kern_enter",
+            }
+        )
+
+    for offset, old_bytes, new_bytes, mnemonics in KERNEL_LIBC_PATCHES:
+        if len(old_bytes) != len(new_bytes):
+            raise ValueError("scalar kernel buffer operation changes the exact-image size")
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"kernel libc buffer operation differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+        verify_scalar_kernel_copy(changed, offset, new_bytes, mnemonics)
+        manifest_patches.append(
+            {
+                "label": (
+                    "replace ring-0 imported memset with scalar clear"
+                    if offset == KERNEL_PAYLOAD_ZERO_OFFSET
+                    else "replace ring-0 imported memcpy with scalar copy"
+                ),
+                "kind": "x86_64_ring0_scalar_buffer_operation",
+                "file_offset": f"0x{offset:x}",
+                "length": len(new_bytes),
+                "old_hex": old_bytes.hex(),
+                "new_hex": new_bytes.hex(),
+                "reason": "avoid calling userland libc from the syscall-11 kernel callback",
             }
         )
 
@@ -653,7 +865,11 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         0x7C6, 0x7CE, 0x7D8,
         0x18D6, 0x18D7,
         *range(0x3A09, 0x3A28),
+        *KERNEL_LIBC_CHANGED_OFFSETS,
         *range(0x4279, 0x42A4),
+        *range(0x42FF, 0x430A),
+        *range(0x430B, 0x433C),
+        *OUTER_STAGE_CHANGED_OFFSETS,
         0x468D, 0x468E,
         0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
         0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -730,8 +946,10 @@ def main() -> None:
     manifest = {
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
-            "core-HEN launch that removes unsafe ring-0 AVX copies and avoids "
-            "unsupported optional and unported userland/plugin paths"
+            "core-HEN launch that removes AVX from the full install-payload "
+            "path, replaces ring-0 imported libc buffer calls, records the "
+            "outer handoff stage, and avoids unsupported optional and unported "
+            "userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
         "source_commit": SOURCE_COMMIT,
@@ -750,7 +968,11 @@ def main() -> None:
                 0x7C6, 0x7CE, 0x7D8,
                 0x18D6, 0x18D7,
                 *range(0x3A09, 0x3A28),
+                *KERNEL_LIBC_CHANGED_OFFSETS,
                 *range(0x4279, 0x42A4),
+                *range(0x42FF, 0x430A),
+                *range(0x430B, 0x433C),
+                *OUTER_STAGE_CHANGED_OFFSETS,
                 0x468D, 0x468E,
                 0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
                 0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -776,8 +998,12 @@ def main() -> None:
             "RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF "
             "mailbox hooks recover their context from the caller's live "
             "registers. Compiler-emitted AVX configuration copies in the "
-            "syscall-11 kernel callback are replaced with exact 44-byte scalar "
-            "copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. "
+            "user wrapper and syscall-11 kernel callback are replaced with "
+            "exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel "
+            "hooks remain enabled. The callback's imported memset and memcpy "
+            "calls are replaced with exact scalar clear/copy loops. "
+            "Versioned userland markers bracket the outer install_payload call "
+            "without writing diagnostic state into kernel text. "
             "HDD config I/O, unsupported optional installer helpers, unverified "
             "process/UI patches, plugin hooks and upload, and the "
             "ShellUI/PartyDaemon restart are skipped; hardware validation "

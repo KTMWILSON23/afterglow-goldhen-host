@@ -24,12 +24,12 @@ import { sha256Hex } from "./sha256.js";
 
 const HEN_BIN = {
   length: 498720,
-  sha256: "140bace69df37f2518d03e528c42872192abac5cc15a9df6301de96f95b47efc",
+  sha256: "525867736cfefad7a946dc006a09c3764440b88fc38384b81ab28e727ccdd489",
 };
 const CANDIDATE_READY = true;
 
 const S = {
-  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, dup: 41,
+  read: 3, open: 5, close: 6, unlink: 10, ioctl: 54, mprotect: 74, dup: 41,
   getrlimit: 194, setrlimit: 195,
   socket: 97, setsockopt: 105,
   getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
@@ -1192,8 +1192,25 @@ async function attempt(ctx, opts) {
           "/user/temp/hen.installed is present; close=" + markerClosed);
         return { payload: true, defused: true, installed: true, alreadyOpen: true };
       }
+      const stagePresent = function (path) {
+        const fd = sc(S.open, cstr(path).at, 0).i32;
+        if (fd < 0) return false;
+        sc(S.close, fd);
+        return true;
+      };
+      const enteredInstall = stagePresent("/user/temp/h14r9.pre");
+      const returnedInstall = stagePresent("/user/temp/h14r9.post");
+      let stageReport = "HEN stopped before the install-payload call";
+      if (returnedInstall) {
+        stageReport = "install_payload returned; the failure happened later in outer HEN";
+      } else if (enteredInstall) {
+        stageReport = "install_payload was entered but did not return";
+      }
       say("[p] kernel is open but the HEN completion marker is absent, errno " + markerErrno);
-      await checkpoint("HEN-MARKER-MISSING", "open errno=" + markerErrno);
+      say("[p] LAST HEN STAGE: " + stageReport);
+      await checkpoint("HEN-MARKER-MISSING",
+        "open errno=" + markerErrno + "; pre=" + enteredInstall +
+        "; post=" + returnedInstall + "; " + stageReport);
       return false;
     }
   }
@@ -1825,6 +1842,11 @@ async function loadPayload(url, vorab, defused) {
     say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
     return false;
   }
+  const stagePrePath = cstr("/user/temp/h14r9.pre");
+  const stagePostPath = cstr("/user/temp/h14r9.post");
+  sc(S.unlink, stagePrePath.at);
+  sc(S.unlink, stagePostPath.at);
+  say("[p] cleared previous r9 handoff markers before starting HEN");
   if (!await checkpoint("pthread-armed", "starting corrected HEN thread")) {
     say("[p] PC collector did not acknowledge payload start");
     return false;
@@ -1863,8 +1885,24 @@ async function loadPayload(url, vorab, defused) {
   }
 
   if (!STATE.henInstalled) {
+    const stagePresent = function (path) {
+      const fd = sc(S.open, cstr(path).at, 0).i32;
+      if (fd < 0) return false;
+      sc(S.close, fd);
+      return true;
+    };
+    const enteredInstall = stagePresent("/user/temp/h14r9.pre");
+    const returnedInstall = stagePresent("/user/temp/h14r9.post");
+    let stageReport = "HEN stopped before the install-payload call";
+    if (returnedInstall) {
+      stageReport = "install_payload returned; the failure happened later in outer HEN";
+    } else if (enteredInstall) {
+      stageReport = "install_payload was entered but did not return";
+    }
     await checkpoint("HEN-MARKER-TIMEOUT",
-      "pthread started; marker absent after 15s; errno=" + markerErrno);
+      "pthread started; marker absent after 15s; errno=" + markerErrno +
+      "; pre=" + enteredInstall + "; post=" + returnedInstall + "; " + stageReport);
+    say("[p] LAST HEN STAGE: " + stageReport);
     say("[p] HEN thread is still unconfirmed after 15 seconds; keeping this page alive");
     return false;
   }
