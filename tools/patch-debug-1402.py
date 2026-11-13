@@ -8,7 +8,8 @@ configuration copies in both the user wrapper and the syscall-11 kernel
 callback, and replaces the callback's imported libc buffer operations with
 scalar loops. This removes vector/FPU and userland-library execution from the
 install-payload kernel path. It retains the FSELF/FPKG kernel hooks, but
-bypasses the redundant outer jailbreak/kernel-patch callbacks, unsupported
+  enters the core installer directly and bypasses the redundant outer program,
+  jailbreak/kernel-patch callbacks, unsupported
 optional installer actions, the unported 14.00-derived userland patch table,
 plugin hooks, optional ShellCore plugin-loader injection, and deliberate
 ShellUI restart. It does not prove the remaining HEN runtime on hardware.
@@ -47,7 +48,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "6c09ecf7a4183761c5f5d794eeecb302eb0e51303985167118cfe763742ac612"
+OUTPUT_SHA256 = "ff283e33b60d1ac3916ed1641bc539eeda09e930a3dcfa807103681a2f1c0c10"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -293,6 +294,40 @@ OUTER_FAST_LANE_CHANGED_OFFSETS = frozenset(
     if old_byte != new_byte
 )
 
+# The outer HEN program still terminates WebProcess shortly after its pthread
+# starts. Enter a compact start routine in the already-skipped optional block:
+# it builds the same 44-byte safe config, calls only install_payload, creates
+# the completion marker after that call returns, and exits the thread cleanly.
+DIRECT_ENTRY_OFFSET = 0x0000
+DIRECT_ENTRY = bytes.fromhex("e968430000")
+DIRECT_ENTRY_PATCH = bytes.fromhex("e9fb4b0000")
+DIRECT_ENTRY_OLD_TARGET = 0x436D
+DIRECT_ENTRY_TARGET = 0x4C00
+DIRECT_FIRMWARE_CALL_OFFSET = 0x42FA
+DIRECT_FIRMWARE_CALL = bytes.fromhex("e89e550000")
+DIRECT_FIRMWARE_PATCH = bytes.fromhex("66b87a0590")
+DIRECT_FIRMWARE_OLD_TARGET = 0x989D
+DIRECT_INSTALL_STUB_OFFSET = 0x4C00
+DIRECT_INSTALL_STUB = bytes.fromhex(
+    "004c89f94889efff153b53070031c9bf590200004189c44889ea31c0"
+    "be07000000e80a5000008b3df04f070085ff780b4489e24889eee8d724"
+)
+DIRECT_INSTALL_STUB_PATCH = bytes.fromhex(
+    "f30f1efa4883ec384889e731c0b90b000000fcf3abc60424034889e7"
+    "e8c7f6ffff488d3d2c540000e8c21700004883c43831c0c39090909090"
+)
+DIRECT_ENTRY_PATCHES = (
+    (DIRECT_ENTRY_OFFSET, DIRECT_ENTRY, DIRECT_ENTRY_PATCH),
+    (DIRECT_FIRMWARE_CALL_OFFSET, DIRECT_FIRMWARE_CALL, DIRECT_FIRMWARE_PATCH),
+    (DIRECT_INSTALL_STUB_OFFSET, DIRECT_INSTALL_STUB, DIRECT_INSTALL_STUB_PATCH),
+)
+DIRECT_ENTRY_CHANGED_OFFSETS = frozenset(
+    offset + index
+    for offset, old_bytes, new_bytes in DIRECT_ENTRY_PATCHES
+    for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
+    if old_byte != new_byte
+)
+
 # Plugin loading is already disabled below. Avoid writing the unused PRX
 # bundle to /data/hen as well; the core FSELF/FPKG hooks do not need it.
 PRX_UPLOAD_GATE_OFFSET = 0x52DA
@@ -483,6 +518,40 @@ def verify_outer_stage_trampoline(image: bytes | bytearray) -> None:
         raise ValueError("outer install-payload post marker path differs")
 
 
+def verify_direct_install_entry(image: bytes | bytearray) -> None:
+    verify_near_jump(image, DIRECT_ENTRY_OFFSET, DIRECT_ENTRY_TARGET)
+    actual_firmware = bytes(
+        image[
+            DIRECT_FIRMWARE_CALL_OFFSET :
+            DIRECT_FIRMWARE_CALL_OFFSET + len(DIRECT_FIRMWARE_PATCH)
+        ]
+    )
+    if actual_firmware != DIRECT_FIRMWARE_PATCH:
+        raise ValueError("direct installer firmware constant differs")
+    actual = bytes(
+        image[
+            DIRECT_INSTALL_STUB_OFFSET :
+            DIRECT_INSTALL_STUB_OFFSET + len(DIRECT_INSTALL_STUB_PATCH)
+        ]
+    )
+    if actual != DIRECT_INSTALL_STUB_PATCH:
+        raise ValueError("direct install-payload entry stub differs")
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    instructions = list(decoder.disasm(actual, DIRECT_INSTALL_STUB_OFFSET))
+    if sum(instruction.size for instruction in instructions) != len(actual):
+        raise ValueError("direct install-payload entry stub does not decode fully")
+    if tuple(instruction.mnemonic for instruction in instructions) != (
+        "endbr64", "sub", "mov", "xor", "mov", "cld", "rep stosd",
+        "mov", "mov", "call", "lea", "call", "add", "xor", "ret",
+        "nop", "nop", "nop", "nop", "nop",
+    ):
+        raise ValueError("direct install-payload entry stub decoded unexpectedly")
+    verify_near_call(image, DIRECT_INSTALL_STUB_OFFSET + 0x1C, 0x42E8)
+    verify_near_call(image, DIRECT_INSTALL_STUB_OFFSET + 0x28, 0x63EF)
+    if bytes(image[0xA054 : 0xA054 + 25]) != b"/user/temp/hen.installed\0":
+        raise ValueError("direct installer completion-marker path differs")
+
+
 def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     if len(original) != INPUT_SIZE or sha256(original) != INPUT_SHA256:
         raise ValueError("input is not the exact published Akatsuki debug.bin")
@@ -626,6 +695,39 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             "reason": (
                 "avoid dead config loads and the remaining HDD file check "
                 "after the safe in-memory configuration is initialized"
+            ),
+        }
+    )
+
+    verify_near_jump(original, DIRECT_ENTRY_OFFSET, DIRECT_ENTRY_OLD_TARGET)
+    verify_near_call(
+        original, DIRECT_FIRMWARE_CALL_OFFSET, DIRECT_FIRMWARE_OLD_TARGET
+    )
+    for offset, old_bytes, new_bytes in DIRECT_ENTRY_PATCHES:
+        if len(old_bytes) != len(new_bytes):
+            raise ValueError("direct install entry patch changes the exact-image size")
+        actual = bytes(original[offset : offset + len(old_bytes)])
+        if actual != old_bytes:
+            raise ValueError(
+                f"direct install entry source differs at 0x{offset:x}: "
+                f"expected {old_bytes.hex()}, got {actual.hex()}"
+            )
+        changed[offset : offset + len(old_bytes)] = new_bytes
+    verify_direct_install_entry(changed)
+    manifest_patches.append(
+        {
+            "label": "run only the core installer from the HEN pthread",
+            "kind": "x86_64_direct_install_entry",
+            "entry_file_offset": f"0x{DIRECT_ENTRY_OFFSET:x}",
+            "stub_file_offset": f"0x{DIRECT_INSTALL_STUB_OFFSET:x}",
+            "firmware_file_offset": f"0x{DIRECT_FIRMWARE_CALL_OFFSET:x}",
+            "install_target_file_offset": "0x42e8",
+            "completion_marker": "/user/temp/hen.installed",
+            "firmware": "14.02",
+            "config_size": 44,
+            "reason": (
+                "return cleanly after the core installer instead of continuing "
+                "through the outer HEN program that terminated WebProcess"
             ),
         }
     )
@@ -985,6 +1087,7 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         *OUTER_STAGE_CHANGED_OFFSETS,
         *OUTER_PREINSTALL_CHANGED_OFFSETS,
         *OUTER_FAST_LANE_CHANGED_OFFSETS,
+        *DIRECT_ENTRY_CHANGED_OFFSETS,
         0x468D, 0x468E,
         0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
         0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -1062,8 +1165,8 @@ def main() -> None:
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
             "core-HEN launch that removes AVX from the full install-payload "
-            "path, replaces ring-0 imported libc buffer calls, uses a direct "
-            "file-I/O-free handoff, skips redundant outer jailbreak/patch callbacks, "
+            "path, replaces ring-0 imported libc buffer calls, uses a compact "
+            "direct core-installer entry, skips redundant outer jailbreak/patch callbacks, "
             "and avoids unsupported optional and unported userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
@@ -1090,6 +1193,7 @@ def main() -> None:
                 *OUTER_STAGE_CHANGED_OFFSETS,
                 *OUTER_PREINSTALL_CHANGED_OFFSETS,
                 *OUTER_FAST_LANE_CHANGED_OFFSETS,
+                *DIRECT_ENTRY_CHANGED_OFFSETS,
                 0x468D, 0x468E,
                 0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
                 0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -1119,7 +1223,8 @@ def main() -> None:
             "exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel "
             "hooks remain enabled. The callback's imported memset and memcpy "
             "calls are replaced with exact scalar clear/copy loops. "
-            "The live path calls install_payload directly without marker-file I/O. "
+            "The live pthread entry builds the safe config, calls install_payload "
+            "directly, creates the completion marker only after it returns, and exits. "
             "The outer jailbreak, installed-marker check, generic kernel-patch "
             "callback, and remaining config-file check are skipped "
             "because Afterglow already completed those operations. "

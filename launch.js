@@ -2,7 +2,7 @@
    failed shots can restart directly without a per-boot attempt cap. */
 (function () {
   "use strict";
-  const DEST = "launch.html?v=1402hen12&log=1&afterglow=run&payload=hen-1402-core.bin&retry=0&g=drain:16&g=drainsz:0x4000";
+  const DEST = "launch.html?v=1402hen13&log=1&afterglow=run&payload=hen-1402-core.bin&retry=0&g=drain:16&g=drainsz:0x4000";
   const LOCK = "hen-1402-core-attempted";
   const TOKEN = "hen-1402-core-tab-token";
   const UNLIMITED = "hen-1402-unlimited";

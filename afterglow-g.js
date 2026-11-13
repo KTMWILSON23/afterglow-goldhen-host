@@ -24,7 +24,7 @@ import { sha256Hex } from "./sha256.js";
 
 const HEN_BIN = {
   length: 498720,
-  sha256: "6c09ecf7a4183761c5f5d794eeecb302eb0e51303985167118cfe763742ac612",
+  sha256: "ff283e33b60d1ac3916ed1641bc539eeda09e930a3dcfa807103681a2f1c0c10",
 };
 const CANDIDATE_READY = true;
 
