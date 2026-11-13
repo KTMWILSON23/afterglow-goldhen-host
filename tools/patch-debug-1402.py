@@ -47,7 +47,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "9897135b31bfd0eecafb770e2bb4a6b720de47e18c84e01314294592c34c9515"
+OUTPUT_SHA256 = "6c09ecf7a4183761c5f5d794eeecb302eb0e51303985167118cfe763742ac612"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -211,7 +211,7 @@ OUTER_OPTIONAL_TARGET = 0x4F0E
 # text or alter the install_payload ABI.
 OUTER_STAGE_CALL_OFFSET = 0x4F13
 OUTER_STAGE_CALL = bytes.fromhex("e8d0f3ffff")
-OUTER_STAGE_CALL_PATCH = bytes.fromhex("e868fcffff")
+OUTER_STAGE_CALL_PATCH = OUTER_STAGE_CALL
 OUTER_STAGE_TRAMPOLINE_OFFSET = 0x4B80
 OUTER_STAGE_TRAMPOLINE = bytes.fromhex(
     "550000be00020000f3ab4889efff15b553070031c9"
@@ -246,19 +246,19 @@ OUTER_STAGE_CHANGED_OFFSETS = frozenset(
 
 # Afterglow has already installed the verified 14.02 host patches and changed
 # this WebProcess to uid 0 before starting the HEN thread. Re-entering HEN's
-# older generic jailbreak and installer patch callbacks is redundant and is
-# the only remaining outer path before install_payload. Skip both calls while
-# retaining the firmware check, installed marker check, config and core payload.
+# older generic jailbreak and installer patch callbacks is redundant. Jump
+# over the jailbreak plus installed-marker check, then skip install_patches,
+# while retaining firmware validation, safe config and the core payload.
 OUTER_JAILBREAK_CALL_OFFSET = 0x452C
 OUTER_JAILBREAK_CALL = bytes.fromhex("e8ff540000")
-OUTER_JAILBREAK_BYPASS = bytes.fromhex("9090909090")
+OUTER_JAILBREAK_BYPASS = bytes.fromhex("e956010000")
 OUTER_INSTALL_PATCHES_CALL_OFFSET = 0x4682
 OUTER_INSTALL_PATCHES_CALL = bytes.fromhex("e837fcffff")
 OUTER_INSTALL_PATCHES_BYPASS = bytes.fromhex("9090909090")
 OUTER_PREINSTALL_BYPASSES = (
     (
         OUTER_JAILBREAK_CALL_OFFSET,
-        "skip redundant outer HEN jailbreak callback",
+        "jump over redundant jailbreak and installed-marker check",
         OUTER_JAILBREAK_CALL,
         OUTER_JAILBREAK_BYPASS,
         0x9A30,
@@ -275,6 +275,21 @@ OUTER_PREINSTALL_CHANGED_OFFSETS = frozenset(
     offset + index
     for offset, _, old_bytes, new_bytes, _ in OUTER_PREINSTALL_BYPASSES
     for index, (old_byte, new_byte) in enumerate(zip(old_bytes, new_bytes))
+    if old_byte != new_byte
+)
+
+# Once the safe defaults are built, jump directly to the core installer.
+# This removes both file-existence checks and all marker-file I/O while still
+# retaining initKernel, initLibc, firmware validation, and the known config.
+OUTER_FAST_LANE_OFFSET = 0x4691
+OUTER_FAST_LANE = bytes.fromhex("448b742444")
+OUTER_FAST_LANE_PATCH = bytes.fromhex("e978080000")
+OUTER_FAST_LANE_TARGET = 0x4F0E
+OUTER_FAST_LANE_CHANGED_OFFSETS = frozenset(
+    OUTER_FAST_LANE_OFFSET + index
+    for index, (old_byte, new_byte) in enumerate(
+        zip(OUTER_FAST_LANE, OUTER_FAST_LANE_PATCH)
+    )
     if old_byte != new_byte
 )
 
@@ -454,7 +469,7 @@ def verify_outer_stage_trampoline(image: bytes | bytearray) -> None:
         "push", "lea", "call", "mov", "call", "lea", "call", "pop", "ret",
     ):
         raise ValueError("outer install-payload stage trampoline decoded unexpectedly")
-    verify_near_call(image, OUTER_STAGE_CALL_OFFSET, OUTER_STAGE_TRAMPOLINE_OFFSET)
+    verify_near_call(image, OUTER_STAGE_CALL_OFFSET, 0x42E8)
     verify_near_call(image, 0x4B88, 0x63EF)
     verify_near_call(image, 0x4B91, 0x42E8)
     verify_near_call(image, 0x4B9D, 0x63EF)
@@ -538,15 +553,16 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
     verify_outer_stage_trampoline(changed)
     manifest_patches.append(
         {
-            "label": "record outer install-payload entry and return",
-            "kind": "x86_64_userland_stage_trampoline",
+            "label": "call install_payload directly without marker-file I/O",
+            "kind": "x86_64_userland_direct_install_call",
             "call_file_offset": f"0x{OUTER_STAGE_CALL_OFFSET:x}",
+            "target_file_offset": "0x42e8",
             "trampoline_file_offset": f"0x{OUTER_STAGE_TRAMPOLINE_OFFSET:x}",
             "pre_marker": OUTER_STAGE_PRE_PATCH[:-1].decode("ascii"),
             "post_marker": OUTER_STAGE_POST_PATCH[:-1].decode("ascii"),
             "reason": (
-                "make a WebProcess replacement report whether install_payload "
-                "was entered and whether it returned"
+                "the diagnostic helper remains dormant in the skipped optional "
+                "block; the live path avoids its pre/post file writes"
             ),
         }
     )
@@ -565,17 +581,54 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         manifest_patches.append(
             {
                 "label": label,
-                "kind": "x86_64_nop_call",
+                "kind": (
+                    "x86_64_outer_fast_lane"
+                    if offset == OUTER_JAILBREAK_CALL_OFFSET
+                    else "x86_64_nop_call"
+                ),
                 "file_offset": f"0x{offset:x}",
                 "old_target_file_offset": f"0x{target:x}",
                 "old_hex": old_bytes.hex(),
                 "new_hex": new_bytes.hex(),
                 "reason": (
                     "Afterglow already installed the verified 14.02 kernel "
-                    "patches and jailbroke the WebProcess"
+                    "patches and jailbroke the WebProcess; the first jump also "
+                    "avoids the outer installed-marker file check"
                 ),
             }
         )
+
+    actual = bytes(
+        original[
+            OUTER_FAST_LANE_OFFSET :
+            OUTER_FAST_LANE_OFFSET + len(OUTER_FAST_LANE)
+        ]
+    )
+    if actual != OUTER_FAST_LANE:
+        raise ValueError(
+            f"outer fast-lane source differs at 0x{OUTER_FAST_LANE_OFFSET:x}: "
+            f"expected {OUTER_FAST_LANE.hex()}, got {actual.hex()}"
+        )
+    changed[
+        OUTER_FAST_LANE_OFFSET :
+        OUTER_FAST_LANE_OFFSET + len(OUTER_FAST_LANE)
+    ] = OUTER_FAST_LANE_PATCH
+    verify_near_jump(changed, OUTER_JAILBREAK_CALL_OFFSET, 0x4687)
+    verify_near_jump(changed, OUTER_FAST_LANE_OFFSET, OUTER_FAST_LANE_TARGET)
+    manifest_patches.append(
+        {
+            "label": "jump from safe defaults directly to the core installer",
+            "kind": "x86_64_outer_fast_lane",
+            "file_offset": f"0x{OUTER_FAST_LANE_OFFSET:x}",
+            "target_file_offset": f"0x{OUTER_FAST_LANE_TARGET:x}",
+            "old_hex": OUTER_FAST_LANE.hex(),
+            "new_hex": OUTER_FAST_LANE_PATCH.hex(),
+            "reason": (
+                "avoid dead config loads and the remaining HDD file check "
+                "after the safe in-memory configuration is initialized"
+            ),
+        }
+    )
 
     scalar_kernel_copies = (
         (
@@ -931,6 +984,7 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         *range(0x430B, 0x433C),
         *OUTER_STAGE_CHANGED_OFFSETS,
         *OUTER_PREINSTALL_CHANGED_OFFSETS,
+        *OUTER_FAST_LANE_CHANGED_OFFSETS,
         0x468D, 0x468E,
         0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
         0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -1008,8 +1062,8 @@ def main() -> None:
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
             "core-HEN launch that removes AVX from the full install-payload "
-            "path, replaces ring-0 imported libc buffer calls, records the "
-            "outer handoff stage, skips redundant outer jailbreak/patch callbacks, "
+            "path, replaces ring-0 imported libc buffer calls, uses a direct "
+            "file-I/O-free handoff, skips redundant outer jailbreak/patch callbacks, "
             "and avoids unsupported optional and unported userland/plugin paths"
         ),
         "source_repository": SOURCE_REPOSITORY,
@@ -1035,6 +1089,7 @@ def main() -> None:
                 *range(0x430B, 0x433C),
                 *OUTER_STAGE_CHANGED_OFFSETS,
                 *OUTER_PREINSTALL_CHANGED_OFFSETS,
+                *OUTER_FAST_LANE_CHANGED_OFFSETS,
                 0x468D, 0x468E,
                 0x46BB, 0x46BC, 0x46BD, 0x46BE, 0x46C0,
                 0x4AEF, 0x4AF0, 0x4AF1, 0x4AF2,
@@ -1064,9 +1119,9 @@ def main() -> None:
             "exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel "
             "hooks remain enabled. The callback's imported memset and memcpy "
             "calls are replaced with exact scalar clear/copy loops. "
-            "Versioned userland markers bracket the outer install_payload call "
-            "without writing diagnostic state into kernel text. "
-            "The outer jailbreak and generic kernel-patch callbacks are skipped "
+            "The live path calls install_payload directly without marker-file I/O. "
+            "The outer jailbreak, installed-marker check, generic kernel-patch "
+            "callback, and remaining config-file check are skipped "
             "because Afterglow already completed those operations. "
             "HDD config I/O, unsupported optional installer helpers, unverified "
             "process/UI patches, plugin hooks and upload, and the "

