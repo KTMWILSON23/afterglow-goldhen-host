@@ -7,9 +7,9 @@ verified against the decrypted kernel. It replaces compiler-emitted AVX
 configuration copies in both the user wrapper and the syscall-11 kernel
 callback, replaces the callback's imported libc buffer operations with
 scalar loops, clears the embedded payload's full file-plus-BSS span, removes
-its diagnostic kernel printf, and starts the SCE_RELA lookup at the verified 14.02 PT_DYNAMIC
-table instead of scanning from the kernel base. This removes vector/FPU and
-userland-library execution from the install-payload kernel path. It retains
+its diagnostic kernel printf, and bounds the SCE_RELA lookup to the verified
+14.02 PT_DYNAMIC span instead of scanning from the kernel base. This removes
+vector/FPU and userland-library execution from the install-payload kernel path. It retains
 the FSELF/FPKG kernel hooks, but
   enters the core installer directly and bypasses the redundant outer program,
   jailbreak/kernel-patch callbacks, unsupported
@@ -37,6 +37,8 @@ from capstone.x86_const import (
     X86_REG_R10,
     X86_REG_EAX,
     X86_REG_RAX,
+    X86_REG_R8,
+    X86_REG_R15D,
 )
 
 
@@ -52,7 +54,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "1c41e9b7f1e5591cfceee0ce11043fab253d1ce53b9d8d2ef60fea0851396406"
+OUTPUT_SHA256 = "1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -142,19 +144,24 @@ KERNEL_LIBC_PATCHES = (
 
 # kpayload_install_payload searches byte by byte for DT_SCE_RELA. The 14.02
 # ELF program headers place PT_DYNAMIC at kernel-base + 0x00cfe890 with a
-# 0x110-byte span. Start the existing bounded search there rather than at the
-# kernel base; the existing signature check, upper bound and failure path are
-# preserved. The patch also replaces the following `xor eax, eax`, which would
-# otherwise discard the verified starting offset.
+# 0x110-byte span. Each matching tag is followed by an unconditional qword
+# read at tag+8, so the final safe 16-byte entry starts at RVA+0x100. The
+# existing post-increment `cmp rax,r15; jb` loop therefore needs the exclusive
+# stop RVA+0x101. The patch also replaces the following `xor eax,eax`, which
+# would discard the verified start.
 KERNEL_DYNAMIC_SCAN_OFFSET = 0x417D
 KERNEL_DYNAMIC_SCAN = bytes.fromhex(
     "4d85c00f84240100004d85ff0f841b01000031c0"
 )
 KERNEL_DYNAMIC_SCAN_PATCH = bytes.fromhex(
-    "b890e8cf00" + "90" * 15
+    "b890e8cf00"       # mov eax, 0x00cfe890
+    "41bf91e9cf00"     # mov r15d, 0x00cfe991 (exclusive entry-start stop)
+    "4d85c0"           # test r8, r8 (preserve the source null guard)
+    "0f8419010000"     # je 0x42aa (existing failure path)
 )
 KERNEL_DYNAMIC_RVA = 0x00CFE890
 KERNEL_DYNAMIC_SIZE = 0x110
+KERNEL_DYNAMIC_SCAN_STOP = KERNEL_DYNAMIC_RVA + KERNEL_DYNAMIC_SIZE - 15
 KERNEL_DYNAMIC_SCAN_CHANGED_OFFSETS = frozenset(
     KERNEL_DYNAMIC_SCAN_OFFSET + index
     for index, (old_byte, new_byte) in enumerate(
@@ -334,7 +341,8 @@ OUTER_FAST_LANE_CHANGED_OFFSETS = frozenset(
 # The outer HEN program still terminates WebProcess shortly after its pthread
 # starts. Enter a compact start routine in the already-skipped optional block:
 # it builds the same 44-byte safe config, calls only install_payload, creates
-# the completion marker after that call returns, and exits the thread cleanly.
+# the completion marker only when that call returns zero, and exits the thread
+# cleanly while preserving a nonzero installer result.
 DIRECT_ENTRY_OFFSET = 0x0000
 DIRECT_ENTRY = bytes.fromhex("e968430000")
 DIRECT_ENTRY_PATCH = bytes.fromhex("e9fb4b0000")
@@ -351,7 +359,7 @@ DIRECT_INSTALL_STUB = bytes.fromhex(
 )
 DIRECT_INSTALL_STUB_PATCH = bytes.fromhex(
     "f30f1efa4883ec384889e731c0b90b000000fcf3abc60424034889e7"
-    "e8c7f6ffff488d3d2c540000e8c21700004883c43831c0c39090909090"
+    "e8c7f6ffff85c0750e488d3d28540000e8be17000031c04883c438c390"
 )
 DIRECT_ENTRY_PATCHES = (
     (DIRECT_ENTRY_OFFSET, DIRECT_ENTRY, DIRECT_ENTRY_PATCH),
@@ -461,6 +469,27 @@ def verify_short_jump(image: bytes | bytearray, offset: int, target: int) -> Non
         )
 
 
+def verify_short_conditional_jump(
+    image: bytes | bytearray, offset: int, mnemonic: str, target: int
+) -> None:
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(decoder.disasm(bytes(image[offset : offset + 2]), offset))
+    if len(instructions) != 1 or instructions[0].size != 2:
+        raise ValueError(f"0x{offset:x} is not exactly one short instruction")
+    instruction = instructions[0]
+    if (
+        instruction.mnemonic != mnemonic
+        or len(instruction.operands) != 1
+        or instruction.operands[0].type != X86_OP_IMM
+        or instruction.operands[0].imm != target
+    ):
+        raise ValueError(
+            f"short {mnemonic} at 0x{offset:x} does not target 0x{target:x}: "
+            f"{instruction.mnemonic} {instruction.op_str}"
+        )
+
+
 def verify_near_jump(image: bytes | bytearray, offset: int, target: int) -> None:
     decoder = Cs(CS_ARCH_X86, CS_MODE_64)
     decoder.detail = True
@@ -524,7 +553,7 @@ def verify_scalar_kernel_copy(
         raise ValueError(f"vector instruction remains at 0x{offset:x}")
 
 
-def verify_kernel_dynamic_scan_start(image: bytes | bytearray) -> None:
+def verify_kernel_dynamic_scan_bounds(image: bytes | bytearray) -> None:
     actual = bytes(
         image[
             KERNEL_DYNAMIC_SCAN_OFFSET :
@@ -532,13 +561,16 @@ def verify_kernel_dynamic_scan_start(image: bytes | bytearray) -> None:
         ]
     )
     if actual != KERNEL_DYNAMIC_SCAN_PATCH:
-        raise ValueError("14.02 PT_DYNAMIC scan-start patch differs")
+        raise ValueError("14.02 PT_DYNAMIC scan-bounds patch differs")
     decoder = Cs(CS_ARCH_X86, CS_MODE_64)
     decoder.detail = True
     instructions = list(decoder.disasm(actual, KERNEL_DYNAMIC_SCAN_OFFSET))
     if sum(instruction.size for instruction in instructions) != len(actual):
-        raise ValueError("14.02 PT_DYNAMIC scan-start patch does not decode fully")
+        raise ValueError("14.02 PT_DYNAMIC scan-bounds patch does not decode fully")
     first = instructions[0]
+    second = instructions[1]
+    third = instructions[2]
+    fourth = instructions[3]
     if (
         first.mnemonic != "mov"
         or len(first.operands) != 2
@@ -546,9 +578,24 @@ def verify_kernel_dynamic_scan_start(image: bytes | bytearray) -> None:
         or first.operands[0].reg != X86_REG_EAX
         or first.operands[1].type != X86_OP_IMM
         or first.operands[1].imm != KERNEL_DYNAMIC_RVA
-        or any(instruction.mnemonic != "nop" for instruction in instructions[1:])
+        or second.mnemonic != "mov"
+        or len(second.operands) != 2
+        or second.operands[0].type != X86_OP_REG
+        or second.operands[0].reg != X86_REG_R15D
+        or second.operands[1].type != X86_OP_IMM
+        or second.operands[1].imm != KERNEL_DYNAMIC_SCAN_STOP
+        or third.mnemonic != "test"
+        or len(third.operands) != 2
+        or third.operands[0].type != X86_OP_REG
+        or third.operands[0].reg != X86_REG_R8
+        or third.operands[1].type != X86_OP_REG
+        or third.operands[1].reg != X86_REG_R8
+        or fourth.mnemonic != "je"
+        or len(fourth.operands) != 1
+        or fourth.operands[0].type != X86_OP_IMM
+        or fourth.operands[0].imm != 0x42AA
     ):
-        raise ValueError("14.02 PT_DYNAMIC scan-start patch decoded unexpectedly")
+        raise ValueError("14.02 PT_DYNAMIC scan-bounds patch decoded unexpectedly")
 
 
 def verify_outer_stage_trampoline(image: bytes | bytearray) -> None:
@@ -606,12 +653,15 @@ def verify_direct_install_entry(image: bytes | bytearray) -> None:
         raise ValueError("direct install-payload entry stub does not decode fully")
     if tuple(instruction.mnemonic for instruction in instructions) != (
         "endbr64", "sub", "mov", "xor", "mov", "cld", "rep stosd",
-        "mov", "mov", "call", "lea", "call", "add", "xor", "ret",
-        "nop", "nop", "nop", "nop", "nop",
+        "mov", "mov", "call", "test", "jne", "lea", "call", "xor",
+        "add", "ret", "nop",
     ):
         raise ValueError("direct install-payload entry stub decoded unexpectedly")
     verify_near_call(image, DIRECT_INSTALL_STUB_OFFSET + 0x1C, 0x42E8)
-    verify_near_call(image, DIRECT_INSTALL_STUB_OFFSET + 0x28, 0x63EF)
+    verify_short_conditional_jump(
+        image, DIRECT_INSTALL_STUB_OFFSET + 0x23, "jne", 0x4C33
+    )
+    verify_near_call(image, DIRECT_INSTALL_STUB_OFFSET + 0x2C, 0x63EF)
     if bytes(image[0xA054 : 0xA054 + 25]) != b"/user/temp/hen.installed\0":
         raise ValueError("direct installer completion-marker path differs")
 
@@ -787,11 +837,13 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             "firmware_file_offset": f"0x{DIRECT_FIRMWARE_CALL_OFFSET:x}",
             "install_target_file_offset": "0x42e8",
             "completion_marker": "/user/temp/hen.installed",
+            "completion_marker_condition": "install_payload returned zero",
             "firmware": "14.02",
             "config_size": 44,
             "reason": (
-                "return cleanly after the core installer instead of continuing "
-                "through the outer HEN program that terminated WebProcess"
+                "return cleanly after the core installer, preserve its nonzero "
+                "result, and create the marker only after a zero result instead "
+                "of continuing through the outer HEN program that terminated WebProcess"
             ),
         }
     )
@@ -812,20 +864,23 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         KERNEL_DYNAMIC_SCAN_OFFSET :
         KERNEL_DYNAMIC_SCAN_OFFSET + len(KERNEL_DYNAMIC_SCAN_PATCH)
     ] = KERNEL_DYNAMIC_SCAN_PATCH
-    verify_kernel_dynamic_scan_start(changed)
+    verify_kernel_dynamic_scan_bounds(changed)
     manifest_patches.append(
         {
-            "label": "start SCE_RELA lookup at the 14.02 PT_DYNAMIC table",
-            "kind": "x86_64_kernel_dynamic_scan_start",
+            "label": "bound SCE_RELA lookup to the 14.02 PT_DYNAMIC span",
+            "kind": "x86_64_kernel_dynamic_scan_bounds",
             "file_offset": f"0x{KERNEL_DYNAMIC_SCAN_OFFSET:x}",
             "length": len(KERNEL_DYNAMIC_SCAN_PATCH),
             "old_hex": KERNEL_DYNAMIC_SCAN.hex(),
             "new_hex": KERNEL_DYNAMIC_SCAN_PATCH.hex(),
             "dynamic_rva": f"0x{KERNEL_DYNAMIC_RVA:08x}",
             "dynamic_size": f"0x{KERNEL_DYNAMIC_SIZE:x}",
+            "dynamic_end_exclusive": f"0x{KERNEL_DYNAMIC_RVA + KERNEL_DYNAMIC_SIZE:08x}",
+            "entry_size": "0x10",
+            "scan_stop_exclusive": f"0x{KERNEL_DYNAMIC_SCAN_STOP:08x}",
             "reason": (
-                "avoid a byte-by-byte search from the kernel base while retaining "
-                "the existing DT_SCE_RELA signature check and bounded failure path"
+                "search only complete entries in the verified 14.02 PT_DYNAMIC span while "
+                "retaining the existing DT_SCE_RELA signature and failure path"
             ),
         }
     )
@@ -1291,8 +1346,8 @@ def main() -> None:
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
             "core-HEN launch that removes AVX from the full install-payload "
-            "path, replaces ring-0 imported libc buffer calls, starts the "
-            "SCE_RELA lookup at the verified 14.02 PT_DYNAMIC table, clears the "
+            "path, replaces ring-0 imported libc buffer calls, bounds the "
+            "SCE_RELA lookup to the verified 14.02 PT_DYNAMIC span, clears the "
             "embedded payload's full BSS span, removes its diagnostic kernel printf, "
             "uses a compact "
             "direct core-installer entry, skips redundant outer jailbreak/patch callbacks, "
@@ -1354,12 +1409,14 @@ def main() -> None:
             "exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel "
             "hooks remain enabled. The callback's imported memset and memcpy "
             "calls are replaced with exact scalar clear/copy loops. Its SCE_RELA "
-            "lookup starts at the 14.02 PT_DYNAMIC RVA 0x00cfe890 while retaining "
-            "the existing signature and bounds checks. The clear covers 0x8200 "
+            "lookup is bounded to the 0x110-byte 14.02 PT_DYNAMIC span at RVA "
+            "0x00cfe890 while retaining the existing signature and failure path. "
+            "The clear covers 0x8200 "
             "bytes so the 0x8008-byte payload's NOBITS globals start at zero, and "
             "the nonessential inner kernel printf is removed. "
             "The live pthread entry builds the safe config, calls install_payload "
-            "directly, creates the completion marker only after it returns, and exits. "
+            "directly, creates the completion marker only after it returns zero, "
+            "preserves a nonzero result, and exits. "
             "The outer jailbreak, installed-marker check, generic kernel-patch "
             "callback, and remaining config-file check are skipped "
             "because Afterglow already completed those operations. "

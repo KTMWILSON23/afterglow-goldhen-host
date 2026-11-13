@@ -648,7 +648,7 @@ export function offsetsFor(uaString) {
 PS4["14.02"] = Object.assign({}, PS4["14.00"], {
   fw_status:
     "state=14.02 " +
-    "webkit=assumed-13.52-identical " +
-    "kernel=afterglow-1402 (apm-UAF, offsets from 14.00 + shiftfit) " +
-    "payload=hen.bin|goldhen.bin",
+    "webkit=13.52-layout-live-validated " +
+    "kernel=afterglow-1402 (apm-UAF, live-preimage-checked) " +
+    "payload=hen-1402-core.bin-sha256-pinned",
 });

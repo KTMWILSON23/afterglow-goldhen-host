@@ -1,85 +1,78 @@
-# How it works
+# PS4 14.02 core-HEN technical record
 
-The kernel bug, the reclaim, the ring 0 bootstrap and the handle teardown are
-the same as in the Lua version of afterglow and are not repeated here.
+## Inputs and output
 
-This file covers what is specific to running it out of the browser.
+- Source binary: `debug.bin`, 498720 bytes, SHA-256
+  `19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5`.
+- Akatsuki source commit:
+  `689446d47fe1f3057923db7d7580efef3f182d87`.
+- HEN source archive: `ps4-hen-main (1).zip`, SHA-256
+  `bf418e981c40b8aa5aaf4874170eed98ba0b6c93228ba8e233542031739f3fac`.
+- Current output: `hen-1402-core.bin`, 498720 bytes, SHA-256
+  `1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239`.
 
-## The two stages
+`tools/patch-debug-1402.py` rejects any input, preimage, instruction, preserved
+value, changed-byte set, output size, or output hash that differs from the
+pinned audit record.
 
-The browser host does not reach the kernel by itself. It runs in two stages:
+## Payload corrections
 
-1. **`jb.js`** — the raw13g host. It builds the in-process primitive from
-   WebKit and hands over four things, and only these four:
+The generated payload:
 
-   | | |
-   |---|---|
-   | `sc(num, ...args)` | syscall with an arbitrary number, returns `{lo, hi, i32}` |
-   | `bufAddr(arrayBuffer)` | address of a backing store |
-   | `p.read1/4/8`, `p.write1/4/8`, `p.readInto` | memory in this process |
-   | `keepAlive` | an array, so buffers survive the collector |
+- corrects the proven 14.02 SETLOGIN, `sceSblACMgrGetPathId`, and
+  `RsaesPkcs1v15Dec2048CRT` references;
+- recovers both 14.02 FSELF hook contexts from the live caller registers;
+- replaces AVX copies in the user wrapper and syscall-11 callback with exact
+  44-byte scalar copies;
+- replaces ring-0 imported `memset`/`memcpy` calls with scalar clear/copy loops;
+- clears `[payload, payload+0x8200)` before copying the 0x8008-byte initialized
+  image, covering the audited BSS through relative offset 0x81F8;
+- runs only the core installer, creates `/user/temp/hen.installed` only after
+  `install_payload` returns zero, and preserves nonzero installer results;
+- skips unported process/UI patches, plugin hooks/uploads, optional installer
+  helpers, and the ShellUI/PartyDaemon restart.
 
-2. **`afterglow.js`** — the kernel exploit, which uses nothing else. There is
-   no requirement for a way to call native code: the only `native.fcall` in the
-   exploit enters a stub that is itself `SYS_syscall(11, body)`, which a host
-   with a syscall primitive issues directly.
+## Bounded dynamic-table lookup
 
-That boundary is why the same exploit drives both hosts. Anything offering the
-four above can carry it.
+The decrypted 14.02 ELF program header places `PT_DYNAMIC` at RVA `0xCFE890`
+with size `0x110`, ending at `0xCFE9A0` exclusive. The lookup compares an
+8-byte tag and, on a match, reads the following 8-byte value. Therefore:
 
-`probeAfterglow()` fires nothing and answers whether the current process can
-carry the exploit at all; `runAfterglow()` is the live chain.
+- first entry start: `0xCFE890`;
+- last complete 16-byte entry start: `0xCFE990`;
+- post-increment loop stop: `0xCFE991` exclusive.
 
-## Which loader, decided by content
+The patch also preserves the original `r8` kernel-base null guard and its
+failure target at file offset `0x42AA`. The decrypted file contains a zeroed
+dynamic table; the live loader-populated contents require hardware validation.
 
-There are two forms of enabler image, and from the outside they look alike:
+## Runtime invariants
 
-| Form | How it is recognised | Path taken |
-|---|---|---|
-| raw payload | begins with `e9` (jmp rel32) | map it, start a thread |
-| composite image | exactly 964,440 bytes | patch chain, trampoline, padding RW |
+- A launch requires the exact same-tab session nonce and local lock created by
+  the landing-page button. The session nonce is consumed before exploit work.
+- A restored launch URL cannot run unattended.
+- The production path contains one payload loader call and one
+  `pthread_create` call.
+- An existing marker returns before exploit work. A live RWX kernel with no
+  marker is treated as unknown and does not start another installer.
+- Marker checks occur at 30, 40, 50, and 60 seconds. Only `ENOENT` means
+  absent; every other open error is unknown.
+- No page reload or automatic HEN retry remains after kernel entry.
+- Known pre-thread payload mappings and verified pre-kernel WebKit failure
+  paths release their mappings/heaps.
+- `pthread_create` return code zero is recorded before the opaque thread handle
+  is read. The handle value is not treated as a success test.
 
-`loadEnabler` in `afterglow.js` decides on the content, **not** on the file
-name. Deciding by name sends a raw payload down the composite path, where the
-length check rejects it.
+## Evidence boundary
 
-## The kernel patch set
+Two earlier clean-boot runs produced the completion marker:
 
-GoldHEN expects to find a patched kernel. afterglow's own fifteen patches cover
-25 of the 51 write sites; the thirty that are missing — one block around
-`0x125791` and three singles — are exactly the ones GoldHEN's code looks for.
+- `1794530805723-5446057519429423` (about 15 seconds);
+- `1794532556517-46065583190575876` (about 30 seconds).
 
-`patchset.bin` (641 bytes, position independent, ends in `ret`) therefore runs
-before **every** GoldHEN payload, in both image forms.
-
-## Two guards
-
-* **The referrer guard.** The run page arms the chain only when it was reached
-  from `index.html` in the same directory. The console's browser restores the
-  last page it had open; without this, a page left on the armed chain would run
-  it again with nobody in front of the screen. The guard sits in `jb.js`, not
-  in the server, so it holds however the files are served.
-* **`no-store` on every response.** The console's browser holds on to modules,
-  and a corrected file would otherwise never arrive. `serve.sh` sets it; any
-  other server used instead has to do the same.
-
-## The ps4-hen offset
-
-`kpayload/source/offsets/1400.c` gives `sceSblPfsSetKeys_addr = 0x006272B0`.
-The function starts at `0x00627270`.
-
-* The two call sites ps4-hen hooks itself (`mountpfs__sceSblPfsSetKeys_hook1`
-  at `0x06a39f9`, `hook2` at `0x06a3c2a`) contain `call` instructions whose
-  target is `0x0627270`.
-* Three calls in the kernel point at `0x0627270`, none at `0x006272B0`.
-* `0x0627270` begins `55 48 89 e5`; `0x006272B0` is `89 45 d0`, mid function.
-
-The hook replaces both call sites and then calls the "original" 64 bytes past
-its entry, on every PFS mount — that is, on every application launch.
-
-`RsaesPkcs1v15Dec2048CRT_addr = 0x0021BFC0` has no prologue either (nearest at
-`0x0021BD20`), but it is never called directly, so this is unconfirmed.
-
-## Scope
-
-The kernel patch lives until the console reboots. Nothing here persists.
+Those runs prove that the then-current core installer returned zero. The final
+bounded dynamic-table revision above was made afterward and needs one new
+hardware marker run. No run yet proves a subsequent FPKG or homebrew launch.
+A native notification request returning zero means the request was accepted;
+it is not a ShellUI-render acknowledgement and is not used as the success
+condition.

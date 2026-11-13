@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PS4 14.02 unlimited HEN host</title>
+  <title>PS4 14.02 core HEN host</title>
   <style>
     body { margin: 0; background: #0a1020; color: #e9f1ff;
       font: 18px/1.5 Arial, sans-serif; }
@@ -22,14 +22,13 @@
 </head>
 <body>
   <main class="content">
-    <h1>PS4 14.02: unlimited HEN launch</h1>
-    <p>This is the real HEN launch. It corrects the 14.02 SELF context bug,
-      keeps the core package-loading hooks, and avoids unsupported menu,
-      plugin, config, and restart paths. It removes vector operations from
-      the complete HEN install-payload handoff.</p>
+    <h1>PS4 14.02: core HEN launch</h1>
+    <p>This clean-boot attempt runs the 14.02 core FSELF/FPKG hook installer.
+      It does not claim plugins, port 9090, a debug menu, or the optional
+      process and UI patches that this core path does not execute.</p>
     <p id="count">Checking launch status...</p>
-    <small>Failed exploit shots retry automatically; a started HEN thread is never duplicated.</small>
+    <small>The page starts at most one installer thread and never reloads itself after kernel work begins.</small>
   </main>
-  <script src="./launch.js?v=hen1402r16"></script>
+  <script src="./launch.js?v=hen1402r17"></script>
 </body>
 </html>

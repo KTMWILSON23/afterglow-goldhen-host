@@ -325,7 +325,6 @@
     "0x4c24",
     "0x4c25",
     "0x4c26",
-    "0x4c27",
     "0x4c28",
     "0x4c29",
     "0x4c2a",
@@ -336,7 +335,6 @@
     "0x4c30",
     "0x4c31",
     "0x4c32",
-    "0x4c33",
     "0x4c34",
     "0x4c35",
     "0x4c36",
@@ -395,7 +393,7 @@
   },
   "output": {
     "path": "hen-1402-core.bin",
-    "sha256": "1c41e9b7f1e5591cfceee0ce11043fab253d1ce53b9d8d2ef60fea0851396406",
+    "sha256": "1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239",
     "size": 498720
   },
   "patches": [
@@ -448,6 +446,7 @@
     },
     {
       "completion_marker": "/user/temp/hen.installed",
+      "completion_marker_condition": "install_payload returned zero",
       "config_size": 44,
       "entry_file_offset": "0x0",
       "firmware": "14.02",
@@ -455,19 +454,22 @@
       "install_target_file_offset": "0x42e8",
       "kind": "x86_64_direct_install_entry",
       "label": "run only the core installer from the HEN pthread",
-      "reason": "return cleanly after the core installer instead of continuing through the outer HEN program that terminated WebProcess",
+      "reason": "return cleanly after the core installer, preserve its nonzero result, and create the marker only after a zero result instead of continuing through the outer HEN program that terminated WebProcess",
       "stub_file_offset": "0x4c00"
     },
     {
+      "dynamic_end_exclusive": "0x00cfe9a0",
       "dynamic_rva": "0x00cfe890",
       "dynamic_size": "0x110",
+      "entry_size": "0x10",
       "file_offset": "0x417d",
-      "kind": "x86_64_kernel_dynamic_scan_start",
-      "label": "start SCE_RELA lookup at the 14.02 PT_DYNAMIC table",
+      "kind": "x86_64_kernel_dynamic_scan_bounds",
+      "label": "bound SCE_RELA lookup to the 14.02 PT_DYNAMIC span",
       "length": 20,
-      "new_hex": "b890e8cf00909090909090909090909090909090",
+      "new_hex": "b890e8cf0041bf91e9cf004d85c00f8419010000",
       "old_hex": "4d85c00f84240100004d85ff0f841b01000031c0",
-      "reason": "avoid a byte-by-byte search from the kernel base while retaining the existing DT_SCE_RELA signature check and bounded failure path"
+      "reason": "search only complete entries in the verified 14.02 PT_DYNAMIC span while retaining the existing DT_SCE_RELA signature and failure path",
+      "scan_stop_exclusive": "0x00cfe991"
     },
     {
       "copy_size": 44,
@@ -661,8 +663,8 @@
       "rva": "0x006276f0"
     }
   ],
-  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, starts the SCE_RELA lookup at the verified 14.02 PT_DYNAMIC table, clears the embedded payload's full BSS span, removes its diagnostic kernel printf, uses a compact direct core-installer entry, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
-  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. Its SCE_RELA lookup starts at the 14.02 PT_DYNAMIC RVA 0x00cfe890 while retaining the existing signature and bounds checks. The clear covers 0x8200 bytes so the 0x8008-byte payload's NOBITS globals start at zero, and the nonessential inner kernel printf is removed. The live pthread entry builds the safe config, calls install_payload directly, creates the completion marker only after it returns, and exits. The outer jailbreak, installed-marker check, generic kernel-patch callback, and remaining config-file check are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
+  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, bounds the SCE_RELA lookup to the verified 14.02 PT_DYNAMIC span, clears the embedded payload's full BSS span, removes its diagnostic kernel printf, uses a compact direct core-installer entry, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
+  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. Its SCE_RELA lookup is bounded to the 0x110-byte 14.02 PT_DYNAMIC span at RVA 0x00cfe890 while retaining the existing signature and failure path. The clear covers 0x8200 bytes so the 0x8008-byte payload's NOBITS globals start at zero, and the nonessential inner kernel printf is removed. The live pthread entry builds the safe config, calls install_payload directly, creates the completion marker only after it returns zero, preserves a nonzero result, and exits. The outer jailbreak, installed-marker check, generic kernel-patch callback, and remaining config-file check are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
   "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
   "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 }

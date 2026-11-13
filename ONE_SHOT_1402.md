@@ -1,66 +1,57 @@
-# PS4 14.02 corrected debug.bin experiment
+# PS4 14.02 one-attempt evidence
 
-This branch is a one-shot candidate based on Akatsuki commit
-`689446d47fe1f3057923db7d7580efef3f182d87`. The manual launcher was
-enabled after independent offline review; a kernel panic remains possible.
-The first 14.02 run stopped before any kernel shot because its thread-function
-resolver expected a module base in an information field that is empty in this
-browser. The corrected launcher reads the existing WebKit pthread_create
-import slot and verifies both the slot and its target against live mappings.
-The next run also stopped before a kernel shot because the live mapping list
-was collected after that import check; the order is corrected. A later run
-verified the import, kernel base, exact stock bytes, and several bounded
-kernel reads, then stopped at the filedesc headroom guard. It made no kernel
-write and did not start the payload. The host now reserves descriptor-table
-capacity with a temporary F_DUPFD descriptor before taking the filedesc
-snapshot, keeps the 200-slot guard, and logs the header fields.
+## Hardware results already obtained
 
-The repository's original `debug.bin` is retained unchanged. Its 14.02
-branch used the 14.00 SETLOGIN instruction address and would corrupt a live
-14.02 instruction. A complete launch later proved that the browser exploit,
-guarded kernel writes, privilege changes, payload copy, and payload thread all
-completed. HEN displayed its config-update notification, then the PS4 UI
-froze during later startup. Offline comparison with the decrypted 14.02 kernel
-found two more definite bad kernel-table entries: `sceSblACMgrGetPathId`
-pointed at an unrelated function with a different argument contract, and
-`RsaesPkcs1v15Dec2048CRT` pointed at the next, different wrapper.
+The 14.02 browser/kernel route has completed through the reduced HEN installer
+on two clean boots. Both runs returned from `pthread_create` with `rc=0` and
+later found `/user/temp/hen.installed`:
 
-The supplied `ps4-hen-main (1).zip` then exposed the next fault. It contains
-dedicated 14.02 kernel files, but its ShellUI, RemotePlay, and ShellCore patch
-RVAs in `kpayload/source/offsets/1402.c` were copied from 14.00. The earliest
-unchecked write is inside the inner payload's `install_patches()` path. The
-archive still describes public support only through 12.02, so the 14.02 files
-must be treated as an incomplete port rather than a finished release.
+- `1794530805723-5446057519429423`, marker observed at about 15 seconds;
+- `1794532556517-46065583190575876`, marker observed at about 30 seconds.
 
-`tools/patch-debug-1402.py` verifies the original SHA-256, exact instructions,
-and exact old table values. It corrects the three proven kernel references,
-retains the FSELF/FPKG kernel hooks, and forces the inner payload to skip the
-unported process-patch and plugin-hook branches. The outer plugin injector and
-deliberate PartyDaemon/ShellUI restart are also skipped. The resulting
-`debug-1402-fixed.bin` SHA-256 is
-`f20531799820035925b189f1763977340a81a1c2ec8c03779a5d0be991dc7a1a`.
-The nuanced `sceSblAuthMgrVerifyHeader` underlying-body target and the valid
-full-entry `sceSblPfsSetKeys` target remain deliberately preserved.
+The direct payload stub creates that file only when `install_payload` returns
+zero. These results therefore prove more than thread creation, but they do not
+prove that every installed hook works or that an FPKG launches.
 
-This is a real but reduced HEN launch candidate: jailbreak and core
-FSELF/FPKG package-authentication hooks remain, while menu extras, RemotePlay,
-plugins, and the forced UI restart are disabled. It is HEN, not GoldHEN, and
-hardware confirmation is still required.
+## Failures explained by the audit
 
-`debug_server.py` serves only to the configured PS4 IP on a new local port,
-adds no-store headers, verifies both binary hashes, and keeps checkpoint logs
-in `../debug-captures/`. The browser uses a manual Start and a same-tab token;
-the old process-wide and typed cold-boot locks have been removed. The host
-checks 14.02 firmware, a two-way kernel base leak, the live ELF layout, the
-unique swap gadget, exact stock bootstrap and host patch windows, and a
-compact separate state and map read before any kernel write. This reduces the
-full path from 12--15 APM shots to 6 while retaining the exact rights gate and
-live writer guard. Success means only that `pthread_create` returned success;
-the HEN runtime would still need visible confirmation.
+Earlier “unlimited” revisions could start many HEN pthreads in one WebProcess.
+Captured logs show repeated `pthread-returned rc=0` records in the same run.
+That stacked multiple installers and explains those freezes without treating a
+kernel panic or freeze as success.
 
-Known limit: the APM UAF shots can still panic. The file descriptor array may
-change while the next shot is prepared, and each map shot follows multiple
-links before JavaScript can inspect them. Teardown must verify all device and
-queue handles and notes; a failure requires leaving the page open until a
-full console power off. The first run stopped before any kernel shot or payload
-start. No public deployment or push was made while preparing this candidate.
+Other corrected issues included:
+
+- persistent launch state bypassing the same-tab handoff;
+- reloads after unknown kernel state;
+- a second installer when RWX was already open but the marker was missing;
+- retained 137 MB WebKit heaps on verified pre-kernel exits;
+- telemetry failures blocking static/GitHub-hosted execution;
+- unconditional completion-marker creation;
+- AVX and imported libc buffer calls in the ring-0 installer callback;
+- an unbounded byte scan for `DT_SCE_RELA`;
+- the final tag/value entry bound and the preserved kernel-base null guard.
+
+## Current candidate
+
+`hen-1402-core.bin` is 498720 bytes with SHA-256:
+
+`1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239`
+
+Its exact generator/verifier is `tools/patch-debug-1402.py`; the patch record is
+`hen-1402-core.manifest.json`.
+
+The final dynamic-table bound was added after the two successful marker runs.
+The decrypted 14.02 file proves the `PT_DYNAMIC` address and size, while the
+table itself is populated by the live loader. Therefore the next legitimate
+test is one clean-boot hardware attempt with this exact hash.
+
+## Next proof
+
+1. Obtain the explicit green completion-marker result on the current hash.
+2. Without running the host again on that boot, launch one known installed
+   FPKG or homebrew title.
+3. Record whether it opens, freezes, or returns a specific system error.
+
+That result distinguishes “core installer returned zero” from “the installed
+FSELF/FPKG hooks work in practice.”

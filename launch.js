@@ -1,17 +1,16 @@
-/* Unlimited launch mode. The first press arms the same-tab handoff; later
-   failed shots can restart directly without a per-boot attempt cap. */
+/* One explicit same-tab handoff per clean boot. A fresh nonce prevents a
+   browser-restored launch page from running without another button press. */
 (function () {
   "use strict";
-  const DEST = "launch.html?v=1402hen16&log=1&afterglow=run&payload=hen-1402-core.bin&retry=0&g=drain:16&g=drainsz:0x4000";
+  const DEST = "launch.html?v=1402hen17&log=1&afterglow=run&payload=hen-1402-core.bin&g=drain:16&g=drainsz:0x4000";
   const LOCK = "hen-1402-core-attempted";
   const TOKEN = "hen-1402-core-tab-token";
-  const UNLIMITED = "hen-1402-unlimited";
   const CANDIDATE_READY = true;
   const count = document.getElementById("count");
   const content = document.querySelector(".content");
   const button = document.createElement("button");
   button.id = "startBtn";
-  button.textContent = "Start unlimited 14.02 HEN attempts";
+  button.textContent = "Start one 14.02 core HEN attempt";
   button.disabled = true;
   if (content) content.appendChild(button);
 
@@ -28,9 +27,17 @@
     if (!CANDIDATE_READY || button.disabled) return;
     button.disabled = true;
     const nonce = String(Date.now()) + "-" + String(Math.random()).slice(2);
-    sessionStorage.setItem(TOKEN, nonce);
-    localStorage.setItem(LOCK, nonce + ":started");
-    localStorage.setItem(UNLIMITED, "1");
+    try {
+      sessionStorage.setItem(TOKEN, nonce);
+      localStorage.setItem(LOCK, nonce + ":started");
+      if (sessionStorage.getItem(TOKEN) !== nonce ||
+          localStorage.getItem(LOCK) !== nonce + ":started")
+        throw new Error("storage verification failed");
+    } catch (_) {
+      status("Browser storage is unavailable; the launch was not armed.");
+      button.disabled = false;
+      return;
+    }
     status("Starting 14.02 HEN...");
     location.assign(DEST + "&run=" + encodeURIComponent(nonce));
   };

