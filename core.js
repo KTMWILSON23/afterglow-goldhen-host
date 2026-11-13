@@ -1724,6 +1724,16 @@ export function releaseFakeCell() {
   return report;
 }
 
+// Terminal-only release for a route that will never use either the fake cell
+// or a promoted pair again. Keep this separate from releaseFakeCell(): pair
+// promotion still needs the holder closures that releaseAttemptAllocations
+// deliberately drops.
+export function releasePrimitiveState() {
+  const report = releaseFakeCell();
+  releaseAttemptAllocations();
+  return report;
+}
+
 export function fakeCellReleased() {
   return fakeReleased;
 }

