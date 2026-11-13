@@ -1784,19 +1784,11 @@ async function attempt(ctx, opts) {
 /* ------------------------------------------------------- Payload Loader */
 
 async function loadPayloadShots(url, blob, defused) {
-  const unlimited = !!(STATE.ctx && STATE.ctx.unlimited === true);
-  let shot = 0;
-  for (;;) {
-    shot++;
-    if (shot > 1) {
-      say("[p] direct HEN shot " + shot + " -- reusing the live kernel and WebKit primitive");
-      await checkpoint("HEN-DIRECT-RETRY",
-        "shot=" + shot + "; no page reload and no new exploit heap");
-      await new Promise(function (resolve) { setTimeout(resolve, 2000); });
-    }
-    const ok = await loadPayload(url, blob, defused);
-    if (ok === true || STATE.henInstalled === true || !unlimited) return ok;
-  }
+  /* Unlimited mode retries failed exploit acquisition, not a HEN pthread.
+     pthread_create returning only proves the thread started; without a join
+     or completion marker it may still be inside install_payload. Starting a
+     second copy would stack installers in the same kernel. */
+  return loadPayload(url, blob, defused);
 }
 
 async function fetchBytes(url, tag) {
@@ -1936,9 +1928,9 @@ async function loadPayload(url, vorab, defused) {
   };
   let markerClosed = false, markerErrno = 0;
   /* Do not run any ROP/syscall work while the new HEN pthread is starting.
-     The prior 250 ms marker polling raced the HEN initializer and repeatedly
-     killed/restarted WebProcess roughly four seconds after pthread_create. */
-  await wait(15000);
+     A known successful 14.02 run produced its marker just after 15 seconds,
+     so leave a full 30-second window and make only one marker check. */
+  await wait(30000);
   const marker = sc(S.open, markerPath.at, 0).i32;
   if (marker >= 0) {
     markerClosed = sc(S.close, marker).i32 === 0;
@@ -1949,8 +1941,8 @@ async function loadPayload(url, vorab, defused) {
 
   if (!STATE.henInstalled) {
     await checkpoint("HEN-MARKER-TIMEOUT",
-      "pthread started; one marker check after 15s was absent; errno=" + markerErrno);
-    say("[p] HEN thread is still unconfirmed after 15 seconds; keeping this page alive");
+      "pthread started; one marker check after 30s was absent; errno=" + markerErrno);
+    say("[p] HEN thread is still unconfirmed after 30 seconds; no second thread was started");
     return false;
   }
 
