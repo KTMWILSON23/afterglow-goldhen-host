@@ -5,9 +5,12 @@ This is an offline, exact-image byte patch. It corrects the SETLOGIN target
 and two embedded kernel function addresses whose 14.02 counterparts were
 verified against the decrypted kernel. It replaces compiler-emitted AVX
 configuration copies in both the user wrapper and the syscall-11 kernel
-callback, and replaces the callback's imported libc buffer operations with
-scalar loops. This removes vector/FPU and userland-library execution from the
-install-payload kernel path. It retains the FSELF/FPKG kernel hooks, but
+callback, replaces the callback's imported libc buffer operations with
+scalar loops, clears the embedded payload's full file-plus-BSS span, removes
+its diagnostic kernel printf, and starts the SCE_RELA lookup at the verified 14.02 PT_DYNAMIC
+table instead of scanning from the kernel base. This removes vector/FPU and
+userland-library execution from the install-payload kernel path. It retains
+the FSELF/FPKG kernel hooks, but
   enters the core installer directly and bypasses the redundant outer program,
   jailbreak/kernel-patch callbacks, unsupported
 optional installer actions, the unported 14.00-derived userland patch table,
@@ -32,6 +35,7 @@ from capstone.x86_const import (
     X86_OP_MEM,
     X86_OP_REG,
     X86_REG_R10,
+    X86_REG_EAX,
     X86_REG_RAX,
 )
 
@@ -48,7 +52,7 @@ HEN_SOURCE_ARCHIVE_SHA256 = (
 )
 INPUT_SIZE = 498_720
 INPUT_SHA256 = "19939e83d0dc57c1172a156503461a333129ebd3f9db704f0dbc3f249ecfcbd5"
-OUTPUT_SHA256 = "ff283e33b60d1ac3916ed1641bc539eeda09e930a3dcfa807103681a2f1c0c10"
+OUTPUT_SHA256 = "1c41e9b7f1e5591cfceee0ce11043fab253d1ce53b9d8d2ef60fea0851396406"
 OLD_LEA_DISP = 0x394ABC
 NEW_LEA_DISP = 0x394E2C
 LSTAR_RVA = 0x1C0
@@ -109,10 +113,13 @@ KERNEL_CONFIG_COPY_OUT_SCALAR = bytes.fromhex(
 # Do not call userland libc while syscall 11 is executing this callback in
 # ring 0. Even after removing explicit AVX, the imported memset/memcpy bodies
 # may select SIMD implementations. These exact-length scalar loops preserve
-# the 0x4000-byte clear and payload_size-byte copy without leaving the callback.
+# a full 0x8200-byte file-plus-BSS clear and payload_size-byte copy without
+# leaving the callback. The embedded payload is 0x8008 bytes and its NOBITS
+# globals extend through offset 0x81f8, so the original one-page clear was too
+# short for this build.
 KERNEL_PAYLOAD_ZERO_OFFSET = 0x4217
 KERNEL_PAYLOAD_ZERO = bytes.fromhex("31f64c89f7ba00400000ff15a15d0700")
-KERNEL_PAYLOAD_ZERO_SCALAR = bytes.fromhex("4c89f731c0b900400000fcf3aa909090")
+KERNEL_PAYLOAD_ZERO_SCALAR = bytes.fromhex("4c89f731c0b900820000fcf3aa909090")
 KERNEL_PAYLOAD_COPY_OFFSET = 0x4227
 KERNEL_PAYLOAD_COPY = bytes.fromhex("488b9578ffffff4c89fe4c89f7ff15865d0700")
 KERNEL_PAYLOAD_COPY_SCALAR = bytes.fromhex(
@@ -131,6 +138,29 @@ KERNEL_LIBC_PATCHES = (
         KERNEL_PAYLOAD_COPY_SCALAR,
         ("mov", "mov", "mov", "cld", "rep movsb", "nop", "nop", "nop"),
     ),
+)
+
+# kpayload_install_payload searches byte by byte for DT_SCE_RELA. The 14.02
+# ELF program headers place PT_DYNAMIC at kernel-base + 0x00cfe890 with a
+# 0x110-byte span. Start the existing bounded search there rather than at the
+# kernel base; the existing signature check, upper bound and failure path are
+# preserved. The patch also replaces the following `xor eax, eax`, which would
+# otherwise discard the verified starting offset.
+KERNEL_DYNAMIC_SCAN_OFFSET = 0x417D
+KERNEL_DYNAMIC_SCAN = bytes.fromhex(
+    "4d85c00f84240100004d85ff0f841b01000031c0"
+)
+KERNEL_DYNAMIC_SCAN_PATCH = bytes.fromhex(
+    "b890e8cf00" + "90" * 15
+)
+KERNEL_DYNAMIC_RVA = 0x00CFE890
+KERNEL_DYNAMIC_SIZE = 0x110
+KERNEL_DYNAMIC_SCAN_CHANGED_OFFSETS = frozenset(
+    KERNEL_DYNAMIC_SCAN_OFFSET + index
+    for index, (old_byte, new_byte) in enumerate(
+        zip(KERNEL_DYNAMIC_SCAN, KERNEL_DYNAMIC_SCAN_PATCH)
+    )
+    if old_byte != new_byte
 )
 KERNEL_LIBC_CHANGED_OFFSETS = frozenset(
     offset + index
@@ -164,6 +194,13 @@ INNER_USERLAND_PATCH_BYPASS = bytes.fromhex("eb05")
 INNER_PLUGIN_HOOK_GATE_OFFSET = 0xBD9C
 INNER_PLUGIN_HOOK_GATE = bytes.fromhex("7427")
 INNER_PLUGIN_HOOK_BYPASS = bytes.fromhex("eb27")
+
+# The only call-capable operation before the two FSELF/FPKG hook writers is a
+# diagnostic kernel printf. It is not required for HEN and can block when the
+# retail console's kernel log path is unavailable, so remove only that call.
+INNER_KERNEL_PRINTF_OFFSET = 0xBD77
+INNER_KERNEL_PRINTF_CALL = bytes.fromhex("ff152b7e0000")
+INNER_KERNEL_PRINTF_BYPASS = bytes.fromhex("90" * 6)
 
 # The 14.02 callers keep their SELF context in registers rather than at the
 # 14.00-derived caller frame slot used by these two mailbox hooks. Recover it
@@ -487,6 +524,33 @@ def verify_scalar_kernel_copy(
         raise ValueError(f"vector instruction remains at 0x{offset:x}")
 
 
+def verify_kernel_dynamic_scan_start(image: bytes | bytearray) -> None:
+    actual = bytes(
+        image[
+            KERNEL_DYNAMIC_SCAN_OFFSET :
+            KERNEL_DYNAMIC_SCAN_OFFSET + len(KERNEL_DYNAMIC_SCAN_PATCH)
+        ]
+    )
+    if actual != KERNEL_DYNAMIC_SCAN_PATCH:
+        raise ValueError("14.02 PT_DYNAMIC scan-start patch differs")
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    instructions = list(decoder.disasm(actual, KERNEL_DYNAMIC_SCAN_OFFSET))
+    if sum(instruction.size for instruction in instructions) != len(actual):
+        raise ValueError("14.02 PT_DYNAMIC scan-start patch does not decode fully")
+    first = instructions[0]
+    if (
+        first.mnemonic != "mov"
+        or len(first.operands) != 2
+        or first.operands[0].type != X86_OP_REG
+        or first.operands[0].reg != X86_REG_EAX
+        or first.operands[1].type != X86_OP_IMM
+        or first.operands[1].imm != KERNEL_DYNAMIC_RVA
+        or any(instruction.mnemonic != "nop" for instruction in instructions[1:])
+    ):
+        raise ValueError("14.02 PT_DYNAMIC scan-start patch decoded unexpectedly")
+
+
 def verify_outer_stage_trampoline(image: bytes | bytearray) -> None:
     actual = bytes(
         image[
@@ -732,6 +796,40 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         }
     )
 
+    actual_dynamic_scan = bytes(
+        original[
+            KERNEL_DYNAMIC_SCAN_OFFSET :
+            KERNEL_DYNAMIC_SCAN_OFFSET + len(KERNEL_DYNAMIC_SCAN)
+        ]
+    )
+    if actual_dynamic_scan != KERNEL_DYNAMIC_SCAN:
+        raise ValueError(
+            "kernel dynamic-table scan source differs at "
+            f"0x{KERNEL_DYNAMIC_SCAN_OFFSET:x}: "
+            f"expected {KERNEL_DYNAMIC_SCAN.hex()}, got {actual_dynamic_scan.hex()}"
+        )
+    changed[
+        KERNEL_DYNAMIC_SCAN_OFFSET :
+        KERNEL_DYNAMIC_SCAN_OFFSET + len(KERNEL_DYNAMIC_SCAN_PATCH)
+    ] = KERNEL_DYNAMIC_SCAN_PATCH
+    verify_kernel_dynamic_scan_start(changed)
+    manifest_patches.append(
+        {
+            "label": "start SCE_RELA lookup at the 14.02 PT_DYNAMIC table",
+            "kind": "x86_64_kernel_dynamic_scan_start",
+            "file_offset": f"0x{KERNEL_DYNAMIC_SCAN_OFFSET:x}",
+            "length": len(KERNEL_DYNAMIC_SCAN_PATCH),
+            "old_hex": KERNEL_DYNAMIC_SCAN.hex(),
+            "new_hex": KERNEL_DYNAMIC_SCAN_PATCH.hex(),
+            "dynamic_rva": f"0x{KERNEL_DYNAMIC_RVA:08x}",
+            "dynamic_size": f"0x{KERNEL_DYNAMIC_SIZE:x}",
+            "reason": (
+                "avoid a byte-by-byte search from the kernel base while retaining "
+                "the existing DT_SCE_RELA signature check and bounded failure path"
+            ),
+        }
+    )
+
     scalar_kernel_copies = (
         (
             KERNEL_CONFIG_COPY_IN_OFFSET,
@@ -885,6 +983,32 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
             "target_file_offset": f"0x{CONFIG_DEFAULTS_TARGET:x}",
             "old_hex": CONFIG_INIT_CALL.hex(),
             "new_hex": CONFIG_DEFAULTS_CALL.hex(),
+        }
+    )
+
+    actual_inner_printf = bytes(
+        original[
+            INNER_KERNEL_PRINTF_OFFSET :
+            INNER_KERNEL_PRINTF_OFFSET + len(INNER_KERNEL_PRINTF_CALL)
+        ]
+    )
+    if actual_inner_printf != INNER_KERNEL_PRINTF_CALL:
+        raise ValueError(
+            f"inner kernel printf call differs at 0x{INNER_KERNEL_PRINTF_OFFSET:x}: "
+            f"expected {INNER_KERNEL_PRINTF_CALL.hex()}, got {actual_inner_printf.hex()}"
+        )
+    changed[
+        INNER_KERNEL_PRINTF_OFFSET :
+        INNER_KERNEL_PRINTF_OFFSET + len(INNER_KERNEL_PRINTF_BYPASS)
+    ] = INNER_KERNEL_PRINTF_BYPASS
+    manifest_patches.append(
+        {
+            "label": "remove diagnostic printf from the inner kernel entry",
+            "kind": "x86_64_nop_indirect_call",
+            "file_offset": f"0x{INNER_KERNEL_PRINTF_OFFSET:x}",
+            "old_hex": INNER_KERNEL_PRINTF_CALL.hex(),
+            "new_hex": INNER_KERNEL_PRINTF_BYPASS.hex(),
+            "reason": "the retail kernel log path is not required for HEN installation",
         }
     )
 
@@ -1080,6 +1204,7 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         0x7C6, 0x7CE, 0x7D8,
         0x18D6, 0x18D7,
         *range(0x3A09, 0x3A28),
+        *KERNEL_DYNAMIC_SCAN_CHANGED_OFFSETS,
         *KERNEL_LIBC_CHANGED_OFFSETS,
         *range(0x4279, 0x42A4),
         *range(0x42FF, 0x430A),
@@ -1094,6 +1219,7 @@ def patch_image(original: bytes) -> tuple[bytes, list[dict[str, object]]]:
         0x52DA, 0x52DB, 0x52DC, 0x52DF,
         *range(0x53AC, 0x53B1),
         *range(0x5519, 0x5522),
+        *range(0xBD77, 0xBD7D),
         0xBD8E, 0xBD9C,
         0xD686, 0xD687, 0xD688, 0xD689, 0xD8AC,
         0x10C6C, 0x10C6D, 0x10C84,
@@ -1165,7 +1291,10 @@ def main() -> None:
         "purpose": (
             "offline correction of three proven 14.02 payload offsets and a "
             "core-HEN launch that removes AVX from the full install-payload "
-            "path, replaces ring-0 imported libc buffer calls, uses a compact "
+            "path, replaces ring-0 imported libc buffer calls, starts the "
+            "SCE_RELA lookup at the verified 14.02 PT_DYNAMIC table, clears the "
+            "embedded payload's full BSS span, removes its diagnostic kernel printf, "
+            "uses a compact "
             "direct core-installer entry, skips redundant outer jailbreak/patch callbacks, "
             "and avoids unsupported optional and unported userland/plugin paths"
         ),
@@ -1186,6 +1315,7 @@ def main() -> None:
                 0x7C6, 0x7CE, 0x7D8,
                 0x18D6, 0x18D7,
                 *range(0x3A09, 0x3A28),
+                *KERNEL_DYNAMIC_SCAN_CHANGED_OFFSETS,
                 *KERNEL_LIBC_CHANGED_OFFSETS,
                 *range(0x4279, 0x42A4),
                 *range(0x42FF, 0x430A),
@@ -1200,6 +1330,7 @@ def main() -> None:
                 0x52DA, 0x52DB, 0x52DC, 0x52DF,
                 *range(0x53AC, 0x53B1),
                 *range(0x5519, 0x5522),
+                *range(0xBD77, 0xBD7D),
                 0xBD8E, 0xBD9C,
                 0xD686, 0xD687, 0xD688, 0xD689, 0xD8AC,
                 0x10C6C, 0x10C6D, 0x10C84,
@@ -1222,7 +1353,11 @@ def main() -> None:
             "user wrapper and syscall-11 kernel callback are replaced with "
             "exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel "
             "hooks remain enabled. The callback's imported memset and memcpy "
-            "calls are replaced with exact scalar clear/copy loops. "
+            "calls are replaced with exact scalar clear/copy loops. Its SCE_RELA "
+            "lookup starts at the 14.02 PT_DYNAMIC RVA 0x00cfe890 while retaining "
+            "the existing signature and bounds checks. The clear covers 0x8200 "
+            "bytes so the 0x8008-byte payload's NOBITS globals start at zero, and "
+            "the nonessential inner kernel printf is removed. "
             "The live pthread entry builds the safe config, calls install_payload "
             "directly, creates the completion marker only after it returns, and exits. "
             "The outer jailbreak, installed-marker check, generic kernel-patch "

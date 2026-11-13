@@ -38,12 +38,33 @@
     "0x3a25",
     "0x3a26",
     "0x3a27",
+    "0x417d",
+    "0x417e",
+    "0x417f",
+    "0x4180",
+    "0x4181",
+    "0x4182",
+    "0x4183",
+    "0x4184",
+    "0x4185",
+    "0x4186",
+    "0x4187",
+    "0x4188",
+    "0x4189",
+    "0x418a",
+    "0x418b",
+    "0x418c",
+    "0x418d",
+    "0x418e",
+    "0x418f",
+    "0x4190",
     "0x4217",
     "0x4218",
     "0x4219",
     "0x421a",
     "0x421b",
     "0x421c",
+    "0x421e",
     "0x4221",
     "0x4222",
     "0x4223",
@@ -339,6 +360,12 @@
     "0x551f",
     "0x5520",
     "0x5521",
+    "0xbd77",
+    "0xbd78",
+    "0xbd79",
+    "0xbd7a",
+    "0xbd7b",
+    "0xbd7c",
     "0xbd8e",
     "0xbd9c",
     "0xd686",
@@ -368,7 +395,7 @@
   },
   "output": {
     "path": "hen-1402-core.bin",
-    "sha256": "ff283e33b60d1ac3916ed1641bc539eeda09e930a3dcfa807103681a2f1c0c10",
+    "sha256": "1c41e9b7f1e5591cfceee0ce11043fab253d1ce53b9d8d2ef60fea0851396406",
     "size": 498720
   },
   "patches": [
@@ -432,6 +459,17 @@
       "stub_file_offset": "0x4c00"
     },
     {
+      "dynamic_rva": "0x00cfe890",
+      "dynamic_size": "0x110",
+      "file_offset": "0x417d",
+      "kind": "x86_64_kernel_dynamic_scan_start",
+      "label": "start SCE_RELA lookup at the 14.02 PT_DYNAMIC table",
+      "length": 20,
+      "new_hex": "b890e8cf00909090909090909090909090909090",
+      "old_hex": "4d85c00f84240100004d85ff0f841b01000031c0",
+      "reason": "avoid a byte-by-byte search from the kernel base while retaining the existing DT_SCE_RELA signature check and bounded failure path"
+    },
+    {
       "copy_size": 44,
       "file_offset": "0x3a09",
       "kind": "x86_64_ring0_scalar_copy",
@@ -456,7 +494,7 @@
       "kind": "x86_64_ring0_scalar_buffer_operation",
       "label": "replace ring-0 imported memset with scalar clear",
       "length": 16,
-      "new_hex": "4c89f731c0b900400000fcf3aa909090",
+      "new_hex": "4c89f731c0b900820000fcf3aa909090",
       "old_hex": "31f64c89f7ba00400000ff15a15d0700",
       "reason": "avoid calling userland libc from the syscall-11 kernel callback"
     },
@@ -529,6 +567,14 @@
       "new_hex": "e81ec1ffff",
       "old_hex": "e820caffff",
       "target_file_offset": "0x7af"
+    },
+    {
+      "file_offset": "0xbd77",
+      "kind": "x86_64_nop_indirect_call",
+      "label": "remove diagnostic printf from the inner kernel entry",
+      "new_hex": "909090909090",
+      "old_hex": "ff152b7e0000",
+      "reason": "the retail kernel log path is not required for HEN installation"
     },
     {
       "file_offset": "0xbd8e",
@@ -615,8 +661,8 @@
       "rva": "0x006276f0"
     }
   ],
-  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, uses a compact direct core-installer entry, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
-  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. The live pthread entry builds the safe config, calls install_payload directly, creates the completion marker only after it returns, and exits. The outer jailbreak, installed-marker check, generic kernel-patch callback, and remaining config-file check are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
+  "purpose": "offline correction of three proven 14.02 payload offsets and a core-HEN launch that removes AVX from the full install-payload path, replaces ring-0 imported libc buffer calls, starts the SCE_RELA lookup at the verified 14.02 PT_DYNAMIC table, clears the embedded payload's full BSS span, removes its diagnostic kernel printf, uses a compact direct core-installer entry, skips redundant outer jailbreak/patch callbacks, and avoids unsupported optional and unported userland/plugin paths",
+  "scope_limit": "The SETLOGIN target, sceSblACMgrGetPathId, and RsaesPkcs1v15Dec2048CRT are corrected. The two 14.02 FSELF mailbox hooks recover their context from the caller's live registers. Compiler-emitted AVX configuration copies in the user wrapper and syscall-11 kernel callback are replaced with exact 44-byte scalar copies. Jailbreak plus FSELF/FPKG kernel hooks remain enabled. The callback's imported memset and memcpy calls are replaced with exact scalar clear/copy loops. Its SCE_RELA lookup starts at the 14.02 PT_DYNAMIC RVA 0x00cfe890 while retaining the existing signature and bounds checks. The clear covers 0x8200 bytes so the 0x8008-byte payload's NOBITS globals start at zero, and the nonessential inner kernel printf is removed. The live pthread entry builds the safe config, calls install_payload directly, creates the completion marker only after it returns, and exits. The outer jailbreak, installed-marker check, generic kernel-patch callback, and remaining config-file check are skipped because Afterglow already completed those operations. HDD config I/O, unsupported optional installer helpers, unverified process/UI patches, plugin hooks and upload, and the ShellUI/PartyDaemon restart are skipped; hardware validation remains required.",
   "source_commit": "689446d47fe1f3057923db7d7580efef3f182d87",
   "source_repository": "https://github.com/Jfkkfjzkz/ps4-akatsuki-jailbreak"
 }
