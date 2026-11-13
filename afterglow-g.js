@@ -37,6 +37,7 @@ const S = {
   cpuset_setaffinity: 488,
   dynlib_get_list: 592, dynlib_get_info: 593,
 };
+const NOTIFY_SYSCALL = 601;
 
 /* Firmware 14.02 offsets used only after live byte checks. */
 const K = {
@@ -150,12 +151,18 @@ function inText(a) { return a.hi >= 0xffffff00 && a.low !== 0; }
 function inHeap(a) { return a.hi >= 0xffff0000 && a.hi < 0xffffff00 && a.low !== 0; }
 function text(a) { return "0x" + a.toString(16).padStart(16, "0"); }
 
-function seedStubs() {
+function seedStubs(extra) {
   const c = host();
   const need = new Set();
   for (const k in S) {
     const n = S[k];
     if (!(c.stubAddr && c.stubAddr.has(n)) && !STATE.stubs[n]) need.add(n);
+  }
+  if (extra) {
+    for (let i = 0; i < extra.length; i++) {
+      const n = extra[i];
+      if (!(c.stubAddr && c.stubAddr.has(n)) && !STATE.stubs[n]) need.add(n);
+    }
   }
   if (!need.size) return [];
 
@@ -246,6 +253,36 @@ function cstr(s) {
   for (let i = 0; i < s.length; i++) b.u8[i] = s.charCodeAt(i);
   b.u8[s.length] = 0;
   return b;
+}
+
+function notifyHenRunning() {
+  const missing = seedStubs([NOTIFY_SYSCALL]);
+  if (missing.indexOf(NOTIFY_SYSCALL) !== -1) {
+    say("[p] HEN is installed; native notification stub was not found");
+    return { ok: false, note: "syscall 601 stub missing" };
+  }
+
+  const request = alloc(0xc30);
+  wipe(request, 0xc30);
+  request.dv.setUint32(0x10, 0xffffffff, true);
+  request.u8[0x2c] = 1;
+
+  const putAscii = function (offset, capacity, value) {
+    const count = Math.min(value.length, capacity - 1);
+    for (let i = 0; i < count; i++) request.u8[offset + i] = value.charCodeAt(i) & 0xff;
+    request.u8[offset + count] = 0;
+  };
+  putAscii(0x2d, 0x400, "HEN 2.2.0 BETA is running");
+  putAscii(0x42d, 0x400, "cxml://psnotification/tex_icon_system");
+
+  try {
+    const rc = sc(NOTIFY_SYSCALL, 0, request.at, 0xc30, 0).i32;
+    say("[p] native HEN running notification rc=" + rc);
+    return { ok: rc === 0, note: "rc=" + rc };
+  } catch (e) {
+    say("[p] HEN is installed; native notification call failed");
+    return { ok: false, note: "call failed" };
+  }
 }
 
 function splitNum(n) { return v(n % LOW, Math.floor(n / LOW)); }
@@ -1191,6 +1228,8 @@ async function attempt(ctx, opts) {
         say("[p] HEN completion marker found -- HEN is installed on this boot");
         await checkpoint("HEN-INSTALLED",
           "/user/temp/hen.installed is present; close=" + markerClosed);
+        const notification = notifyHenRunning();
+        await checkpoint("HEN-NOTIFY", notification.note);
         return { payload: true, defused: true, installed: true, alreadyOpen: true };
       }
       const stagePresent = function (path) {
@@ -1918,7 +1957,9 @@ async function loadPayload(url, vorab, defused) {
 
   await checkpoint("HEN-INSTALLED",
     "/user/temp/hen.installed is present; close=" + markerClosed);
-  say("[p] HEN completion marker confirmed; allowing Welcome and epilogue to finish");
+  const notification = notifyHenRunning();
+  await checkpoint("HEN-NOTIFY", notification.note);
+  say("[p] HEN completion marker confirmed; notification attempted");
   await wait(1000);
 
   if (defused === true && typeof c.releaseAfterPayloadStart === "function") {
