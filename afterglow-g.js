@@ -1228,8 +1228,7 @@ async function attempt(ctx, opts) {
         say("[p] HEN completion marker found -- HEN is installed on this boot");
         await checkpoint("HEN-INSTALLED",
           "/user/temp/hen.installed is present; close=" + markerClosed);
-        const notification = notifyHenRunning();
-        await checkpoint("HEN-NOTIFY", notification.note);
+        notifyHenRunning();
         return { payload: true, defused: true, installed: true, alreadyOpen: true };
       }
       const stagePresent = function (path) {
@@ -1957,8 +1956,7 @@ async function loadPayload(url, vorab, defused) {
 
   await checkpoint("HEN-INSTALLED",
     "/user/temp/hen.installed is present; close=" + markerClosed);
-  const notification = notifyHenRunning();
-  await checkpoint("HEN-NOTIFY", notification.note);
+  notifyHenRunning();
   say("[p] HEN completion marker confirmed; notification attempted");
   await wait(1000);
 
