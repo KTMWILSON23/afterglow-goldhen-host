@@ -604,12 +604,13 @@ PS4["12.52"] = Object.assign({}, PS4["12.50"], {
 PS4["14.00"] = Object.assign({}, PS4["13.52"], {
   alias_of: "13.52-webkit",
 
-  // Reported on screen on every run, so it names what this host actually runs.
+  // Reported on screen on every run, so it names what actually runs: the
+  // kernel stage comes from afterglow, and the payload is picked by ?mode.
   fw_status:
     "state=14.00 " +
     "webkit=13.52-identical " +
     "kernel=afterglow (apm-UAF, own kernel stage) " +
-    "payload=goldhen.bin (official 14.00 build)",
+    "payload=hen.bin|goldhen.bin",
 
   k_stubs: undefined,
   wk___imp_pthread_create: undefined,
@@ -647,7 +648,7 @@ export function offsetsFor(uaString) {
 PS4["14.02"] = Object.assign({}, PS4["14.00"], {
   fw_status:
     "state=14.02 " +
-    "webkit=assumed-13.52-identical " +
-    "kernel=afterglow-1402 (apm-UAF, offsets from 14.00 + shiftfit) " +
-    "payload=goldhen-1402-experimental.bin (core candidate; shell patches disabled)",
+    "webkit=13.52-layout-live-validated " +
+    "kernel=afterglow-1402 (apm-UAF, live-preimage-checked) " +
+    "payload=hen-1402-core.bin-sha256-pinned",
 });

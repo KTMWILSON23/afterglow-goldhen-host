@@ -1,4 +1,4 @@
-name: Deploy GoldHEN host to GitHub Pages
+name: Deploy PS4 14.02 core HEN host to GitHub Pages
 
 on:
   push:
@@ -24,7 +24,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Check launch gate and offline 14.02 research
+      - name: Check one-attempt gate and offline 14.02 research
         run: |
           node tests/launch-gate-selftest.cjs
           node tests/preflight-1402-selftest.cjs

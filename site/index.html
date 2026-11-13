@@ -1,53 +1,34 @@
 <!doctype html>
-<html lang="en" >
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>NanospeedGamer</title>
-    <link rel="stylesheet" href="style.css" />
-  </head>
-  <body>
-    <canvas id="matrix"></canvas>
-
-    <div class="content">
-      <img class="logo" src="logo.png" alt="Logo" />
-      <h1>NanospeedGamer</h1>
-      <p class="subtitle">PS4 14.00 · GoldHEN · 14.02 temporarily disabled</p>
-      <div id="crash-report" role="alert" hidden>
-        <strong>Previous run did not finish</strong>
-        <p id="crash-summary"></p>
-        <button id="ack-crash" type="button">Acknowledge previous run</button>
-      </div>
-      <div id="diagnostic-test" hidden>
-        <button id="test-storage" type="button">Test crash diagnostics</button>
-        <p id="test-result"></p>
-      </div>
-      <p class="count" id="count">GoldHEN starts in 5 seconds...</p>
-      <button id="start" type="button">Start GoldHEN now</button>
-    </div>
-
-    <script src="matrix.js"></script>
-    <script src="breadcrumb.js?v=gh1402crumb1"></script>
-    <script src="launch.js?v=gh1402block2"></script>
-  </body>
-  <script>
-  if (window.applicationCache) {
-    const app = window.applicationCache;
-    const count = document.getElementById("count");
-    app.addEventListener("downloading", () => {
-      if (count) count.textContent = "Guardando caché...";
-    });
-    app.addEventListener("progress", e => {
-      if (count && e.lengthComputable) {
-        count.textContent = "Guardando caché... " + Math.round(e.loaded / e.total * 100) + "%";
-      }
-    });
-    app.addEventListener("cached", () => {
-      if (count) count.textContent = "Caché listo. Iniciando...";
-    });
-    app.addEventListener("noupdate", () => {
-      if (count) count.textContent = "Caché listo. Iniciando...";
-    });
-  }
-</script>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PS4 14.02 core HEN host</title>
+  <style>
+    body { margin: 0; background: #0a1020; color: #e9f1ff;
+      font: 18px/1.5 Arial, sans-serif; }
+    .content { max-width: 720px; margin: 8vh auto; padding: 30px;
+      background: #15213a; border: 1px solid #3b5c82; border-radius: 12px; }
+    h1 { margin-top: 0; color: #85e1c7; }
+    #count { color: #ffdc8a; min-height: 3em; }
+    button { display: block; margin-top: 18px; padding: 13px 20px;
+      font-size: 18px; color: #07141a; background: #85e1c7;
+      border: 0; border-radius: 8px; }
+    button:disabled { opacity: .5; }
+    input { display: block; margin-top: 15px; padding: 12px;
+      font-size: 18px; width: 90%; }
+    small { color: #b1c4de; }
+  </style>
+</head>
+<body>
+  <main class="content">
+    <h1>PS4 14.02: core HEN launch</h1>
+    <p>This clean-boot attempt runs the 14.02 core FSELF/FPKG hook installer.
+      It does not claim plugins, port 9090, a debug menu, or the optional
+      process and UI patches that this core path does not execute.</p>
+    <p id="count">Checking launch status...</p>
+    <small>The page starts at most one installer thread and never reloads itself after kernel work begins.</small>
+  </main>
+  <script src="./launch.js?v=hen1402r17"></script>
+</body>
 </html>
