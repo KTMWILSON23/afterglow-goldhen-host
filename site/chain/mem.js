@@ -1,11 +1,11 @@
-import { int64 } from "./int64.js?v=hen1402r17";
+import { int64 } from "./int64.js";
 
 import {
   releaseFakeCell,
   fakeCellReleased,
   carrierHeaderCopy,
   carrierHomeVector,
-} from "./core.js?v=hen1402r17";
+} from "./core.js";
 
 let carrier = null;
 
@@ -908,18 +908,5 @@ export function installWindowP(c, options) {
     }
   }
   return prim;
-}
-
-export function releaseWindowP() {
-  carrier = null;
-  mainView = null;
-  workerBuffer = null;
-  workerView = null;
-  workerMirror = null;
-  pairVectorOffset = -1;
-  retained.length = 0;
-  try {
-    globalThis.p = undefined;
-  } catch (_) {}
 }
 

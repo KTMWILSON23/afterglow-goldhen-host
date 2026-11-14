@@ -1,4 +1,4 @@
-name: Deploy PS4 14.02 core HEN host to GitHub Pages
+name: Deploy XXFWilson23 PS4 14.02 host
 
 on:
   push:
@@ -24,12 +24,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Check one-attempt gate and offline 14.02 research
-        run: |
-          node tests/launch-gate-selftest.cjs
-          node tests/preflight-1402-selftest.cjs
-          node tests/guarded-bootstrap-1402-selftest.cjs
-          node tests/teardown-verify-1402-selftest.cjs
+      - name: Verify minimal host and pinned payload
+        run: node tests/minimal-host-selftest.cjs
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

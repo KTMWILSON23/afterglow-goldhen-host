@@ -1,181 +1,306 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>afterglow</title>
-    <style>
-      :root {
-        --bg: #0b0d10;
-        --panel: #0e1116;
-        --sunk: #11151b;
-        --line: #1e2732;
-        --fg: #c8ced8;
-        --bright: #e6ebf2;
-        --dim: #7c8798;
-        --faint: #4d5765;
-        --ok: #7fd0a0;
-        --bad: #d08a7f;
-        --warn: #d8c07f;
-        --sans: "Segoe UI", system-ui, sans-serif;
-        --mono: Consolas, "DejaVu Sans Mono", monospace;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        margin: 0;
-        padding: 0;
-        min-height: 100%;
-        background: var(--bg);
-        color: var(--fg);
-        font: 15px/1.45 var(--sans);
-      }
-      #brand {
-        padding: 8px 10px;
-        border-bottom: 1px solid var(--line);
-        background: var(--panel);
-        text-align: center;
-      }
-      #brand b {
-        color: var(--bright);
-        font-size: 15px;
-        font-weight: 700;
-        letter-spacing: 0.14em;
-      }
-      #ramBox {
-        overflow: hidden;
-        padding: 5px 10px;
-        border-bottom: 1px solid var(--line);
-        background: var(--sunk);
-        color: var(--ok);
-        font: 11px/1.4 var(--mono);
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #spin {
-        position: fixed;
-        top: calc(50% + 20px);
-        left: 50%;
-        width: 46px;
-        height: 46px;
-        margin: -23px 0 0 -23px;
-        border: 4px solid var(--line);
-        border-top-color: var(--ok);
-        border-radius: 50%;
-        animation: spin 0.9s linear infinite;
-      }
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-      #msg {
-        position: fixed;
-        top: 50%;
-        left: 0;
-        right: 0;
-        transform: translateY(-50%);
-        display: none;
-        text-align: center;
-        font-size: 16px;
-        letter-spacing: 0.5px;
-      }
-      #state,
-      #out {
-        display: none;
-      }
-      body.done #spin,
-      body.fail #spin {
-        display: none;
-      }
-      body.fail #msg {
-        display: block;
-      }
-      body.done #msg {
-        display: block;
-        color: var(--ok);
-        font-weight: 700;
-        letter-spacing: 2px;
-      }
-      body.log {
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-      }
-      body.log #spin,
-      body.log #msg {
-        display: none;
-      }
-      body.log #wrap {
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-height: 0;
-        padding: 14px 18px 30px;
-      }
-      body.log #state {
-        display: block;
-        margin: 0 0 8px;
-        font-size: 22px;
-        font-weight: 700;
-      }
-      body.log #out {
-        display: block;
-        flex: 1;
-        min-height: 0;
-        overflow-y: auto;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 5px;
-        background: var(--sunk);
-        font: 12px/1.45 var(--mono);
-        white-space: pre-wrap;
-      }
-      .notice {
-        margin: 1em 0;
-        padding: 0.7em 1em;
-        border: 2px solid #e66;
-        background: #2a1414;
-        color: #f99;
-        font: 700 20px/1.4 var(--sans);
-      }
-      .byline {
-        position: fixed;
-        bottom: 9px;
-        left: 11px;
-        margin: 0;
-        color: var(--faint);
-        font: 11px/1 var(--mono);
-        letter-spacing: 0.06em;
-      }
-      .ok {
-        color: var(--ok);
-      }
-      .bad {
-        color: var(--bad);
-      }
-      .warn {
-        color: var(--warn);
-      }
-      code {
-        color: #9fb3d0;
-      }
-    </style>
-  </head>
-  <body>
-    <div id="brand"><b>afterglow</b></div>
-    <div id="ramBox">RAM: checking...</div>
-    <div id="spin"></div>
-    <div id="msg">Restart your console</div>
-    <div id="wrap">
-      <div id="state"></div>
-      <div id="out"></div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070a12">
+  <title>XXFWilson23 // Launching</title>
+  <style>
+    :root {
+      --ink: #f4f7ff;
+      --muted: #96a0b8;
+      --panel: #101725;
+      --line: #27324b;
+      --violet: #9b7bff;
+      --cyan: #49e6d2;
+      --amber: #ffca66;
+      --red: #ff6f85;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 84% 12%, rgba(155,123,255,.14), transparent 28rem),
+        #070a12;
+      font-family: "Trebuchet MS", Arial, sans-serif;
+    }
+
+    .shell {
+      width: min(1200px, calc(100% - 48px));
+      min-height: 100vh;
+      margin: 0 auto;
+      padding: 32px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 58px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      color: var(--ink);
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: .08em;
+    }
+
+    .live {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--cyan);
+      font: 11px/1 Consolas, monospace;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+
+    .live::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 14px var(--cyan);
+    }
+
+    body.success .live { color: var(--cyan); }
+    body.failed .live { color: var(--red); }
+    body.failed .live::before { background: var(--red); box-shadow: 0 0 14px var(--red); }
+
+    .status-card {
+      padding: 26px 30px;
+      border: 1px solid var(--line);
+      background: linear-gradient(135deg, rgba(17,23,38,.98), rgba(10,14,24,.92));
+    }
+
+    .kicker {
+      margin: 0 0 10px;
+      color: var(--violet);
+      font: 700 11px/1 Consolas, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    #state {
+      min-height: 37px;
+      margin: 0;
+      font-size: clamp(27px, 4vw, 42px);
+      line-height: 1.08;
+      letter-spacing: -.035em;
+    }
+
+    body.success #state { color: var(--cyan); }
+    body.failed #state { color: var(--red); }
+
+    .rail {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .phase {
+      min-height: 64px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid var(--line);
+      color: #657089;
+      background: rgba(15,20,33,.72);
+      font: 12px/1.3 Consolas, monospace;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .phase i {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      border: 1px solid currentColor;
+      border-radius: 50%;
+      font-style: normal;
+      font-size: 10px;
+    }
+
+    .phase.active { color: var(--amber); border-color: rgba(255,202,102,.42); }
+    .phase.done { color: var(--cyan); border-color: rgba(73,230,210,.42); }
+
+    #DebugConsole {
+      flex: 1;
+      min-height: 360px;
+      max-height: 54vh;
+      overflow: auto;
+      border: 1px solid var(--line);
+      background: #090d16;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+    }
+
+    .terminal-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      min-height: 42px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      color: #66718a;
+      background: #0d121e;
+      font: 10px/1 Consolas, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    #ramBox { color: #7c89a3; }
+
+    #console {
+      min-height: 300px;
+      margin: 0;
+      padding: 18px;
+      color: #aab5cc;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 11px/1.55 Consolas, "Courier New", monospace;
+    }
+
+    .notice {
+      margin: 0;
+      padding: 15px 18px;
+      border: 1px solid rgba(255,111,133,.52);
+      color: #ffd8df;
+      background: rgba(98,19,37,.32);
+      font: 13px/1.5 Consolas, monospace;
+    }
+
+    .footer-row {
+      min-height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      color: #657089;
+      font: 10px/1.4 Consolas, monospace;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    .footer-row a { color: #8f9ab1; text-decoration: none; }
+    .footer-row a:focus, .footer-row a:hover { color: var(--cyan); }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 28px, 680px); padding: 18px 0; }
+      .rail { grid-template-columns: 1fr; }
+      .phase { min-height: 48px; }
+      #DebugConsole { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand">XXFWilson23</div>
+      <div class="live" id="liveLabel">Launch in progress</div>
+    </header>
+
+    <section class="status-card">
+      <p class="kicker">PS4 // Firmware 14.02</p>
+      <h1 id="state">Initialising engine</h1>
+    </section>
+
+    <section class="rail" aria-label="Launch stages">
+      <div class="phase active" id="phaseBrowser"><i>01</i>Browser entry</div>
+      <div class="phase" id="phaseKernel"><i>02</i>Kernel access</div>
+      <div class="phase" id="phasePayload"><i>03</i>GoldHEN payload</div>
+    </section>
+
+    <section id="DebugConsole" aria-label="Launch log">
+      <div class="terminal-head"><span>Live execution log</span><span id="ramBox">JS heap: N/A</span></div>
+      <pre id="console"></pre>
+    </section>
+
+    <div id="out"></div>
+
+    <div class="footer-row">
+      <span>XXFWilson23 // Direct 14.02 chain</span>
+      <a href="./index.html">Return to launcher</a>
     </div>
-    <p class="byline">by well0nez/m0zz</p>
-    <script type="module">
-      import "./jb-g.js?v=hen1402r17";
-    </script>
-  </body>
+  </div>
+
+  <script>
+    window.isPayloadElf = function (path) {
+      return /\.elf$/i.test(path || "");
+    };
+
+    (function () {
+      var state = document.getElementById("state");
+      var log = document.getElementById("console");
+      var live = document.getElementById("liveLabel");
+      var browserPhase = document.getElementById("phaseBrowser");
+      var kernelPhase = document.getElementById("phaseKernel");
+      var payloadPhase = document.getElementById("phasePayload");
+
+      function setPhase(element, className) {
+        element.className = "phase " + className;
+      }
+
+      function showSuccess() {
+        document.body.classList.remove("failed");
+        document.body.classList.add("success");
+        state.textContent = "GoldHEN started";
+        live.textContent = "Launch complete";
+        setPhase(browserPhase, "done");
+        setPhase(kernelPhase, "done");
+        setPhase(payloadPhase, "done");
+      }
+
+      function showFailure() {
+        if (document.body.classList.contains("success")) return;
+        document.body.classList.add("failed");
+        live.textContent = "Launch stopped";
+      }
+
+      function showVerifying() {
+        if (document.body.classList.contains("success")) return;
+        live.textContent = "Verifying payload";
+      }
+
+      window.jailbreakSuccess = showVerifying;
+
+      var observer = new MutationObserver(function () {
+        var text = log.textContent || "";
+
+        if (text.length > 0) {
+          setPhase(browserPhase, "done");
+          setPhase(kernelPhase, "active");
+        }
+
+        if (/kernel patched|jailbroken, uid 0|kernel interface is live/i.test(text)) {
+          setPhase(kernelPhase, "done");
+          setPhase(payloadPhase, "active");
+        }
+
+        if (/AG\s+done -- [^\n]*enabler running/i.test(text)) {
+          showSuccess();
+        } else if (/AG-FAIL|PROOF-FAIL|JB-THREW|exploit failed/i.test(text)) {
+          showFailure();
+        }
+      });
+
+      observer.observe(log, { childList: true, characterData: true, subtree: true });
+    }());
+  </script>
+  <script type="module" src="./chain/jb.js"></script>
+</body>
 </html>

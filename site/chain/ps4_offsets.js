@@ -637,6 +637,10 @@ PS4["14.00"] = Object.assign({}, PS4["13.52"], {
   k_rootvnode: undefined,
 });
 
+PS4["14.02"] = Object.assign({}, PS4["14.00"], {
+
+});
+
 export function offsetsFor(uaString) {
   const m = (uaString || "").match(/PlayStation\s+4[\/ ](\d+)\.(\d+)/);
   if (!m) return { key: null, off: null };
@@ -644,11 +648,3 @@ export function offsetsFor(uaString) {
   const key = m[1] + "." + parseInt(m[2], 16).toString(16).padStart(2, "0");
   return { key, off: PS4[key] || null };
 }
-
-PS4["14.02"] = Object.assign({}, PS4["14.00"], {
-  fw_status:
-    "state=14.02 " +
-    "webkit=13.52-layout-live-validated " +
-    "kernel=afterglow-1402 (apm-UAF, live-preimage-checked) " +
-    "payload=hen-1402-core.bin-sha256-pinned",
-});

