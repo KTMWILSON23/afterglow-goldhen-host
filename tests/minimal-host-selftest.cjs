@@ -85,6 +85,8 @@ assert.match(index, /class="social-icon youtube"/);
 assert.match(index, /class="social-icon discord"/);
 assert.match(index, /aria-label="Open XXFWilson23 on YouTube"/);
 assert.match(index, /aria-label="Join the XXFWilson23 Discord"/);
+assert.match(index, /viewBox="0 0 64 48"/);
+assert.match(index, /M40\.575 0C39\.9562 1\.09866/);
 assert.match(index, /PlayStation 4/);
 assert.match(index, /location\.replace\("\.\/cache\.html"\)/);
 assert.doesNotMatch(index, /<html[^>]+manifest=/i, "landing page must not start an AppCache update itself");
@@ -101,7 +103,7 @@ assert.doesNotMatch(cachePage, /<script[^>]+src=|<iframe|chain\//i,
   "cache installer must not import exploit code");
 
 assert.match(cacheManifest, /^CACHE MANIFEST\n/);
-assert.match(cacheManifest, /# XXFWilson23 offline cache 2026-11-14\.3/);
+assert.match(cacheManifest, /# XXFWilson23 offline cache 2026-11-14\.4/);
 const cacheBlock = /\nCACHE:\n([\s\S]*?)\nNETWORK:\n\*\s*$/.exec(cacheManifest);
 assert.ok(cacheBlock, "cache manifest must contain CACHE and NETWORK sections");
 assert.deepEqual(cacheBlock[1].trim().split("\n"), [
