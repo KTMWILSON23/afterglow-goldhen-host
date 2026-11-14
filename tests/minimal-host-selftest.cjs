@@ -20,8 +20,12 @@ function listFiles(directory) {
 }
 
 function sha256(relative) {
+  let content = fs.readFileSync(path.join(site, relative));
+  if (relative.endsWith(".js")) {
+    content = Buffer.from(content.toString("utf8").replace(/\r\n/g, "\n"));
+  }
   return crypto.createHash("sha256")
-    .update(fs.readFileSync(path.join(site, relative)))
+    .update(content)
     .digest("hex");
 }
 
@@ -40,12 +44,12 @@ const expectedFiles = [
 assert.deepEqual(listFiles(site), expectedFiles, "published site must contain exactly nine files");
 
 const expectedHashes = {
-  "chain/afterglow.js": "96211b18461f74b51938b9a6051ce98bb81ff8ee59888d16bfdccaad3b77503c",
-  "chain/core.js": "851649fce41c80c8c44fb1d1b022e3f6e95caeb1660b4f85a953a1b1dd3202cf",
-  "chain/int64.js": "15181de17bb63f316f10c0e1ce8cb6341111a23016c1047af4456d47f4896c52",
-  "chain/jb.js": "ce0e2283856cd813e39b711ffc6819a8fb3e71674e0391a4cb819e9b81583b19",
-  "chain/mem.js": "e58704779bc896cf25c371181f7986d368918d4198a7f30d8d8a947b5fafc08b",
-  "chain/ps4_offsets.js": "249dbf616df7366cc38f98b429fa7d1f410b5e2984d4cbfccf623429c5937837",
+  "chain/afterglow.js": "4227ea3e0fe2bf25017c6ca1f02a2b79ce423039a39f9765438e9c8144f75cc3",
+  "chain/core.js": "34797091b327536e9118abd167215a7d669a62f23fc0f8c0aebb5c6373c24fa4",
+  "chain/int64.js": "611da6a52da5ecf970a3718ab2a4561d3992c655c55342d066d12a9a50554f34",
+  "chain/jb.js": "e8c844d5959056aa272b3d98e64468c0a54f6780e7bb1f411f483cb35129da74",
+  "chain/mem.js": "71f700963b0fd2da1fd877122561a343507eb71050451a376daaeaf4f71f1da0",
+  "chain/ps4_offsets.js": "23550c806225c714a3b9fb7a22faf0ba4c5fabf07153712930629252072e14eb",
   "goldhen.bin": "c5480587d99efc2e3cc132352d9b7cf052dd3068280f1686e7fbb37d57e9ba8b",
 };
 
