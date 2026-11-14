@@ -73,8 +73,18 @@ assert.match(index, /XXFWilson23/);
 assert.match(index, /sessionStorage\.setItem\("payload_path", "\.\/goldhen\.bin"\)/);
 assert.match(index, /launch\.html\?mode=goldhen&afterglow=run&fw=1402/);
 assert.doesNotMatch(index + launch + cachePage, /WebKitty/i, "upstream branding leaked into the public interface");
-assert.doesNotMatch(index + launch + cachePage, /(?:src|href)=["']https?:\/\/(?!github\.com\/KTMWILSON23\/afterglow-goldhen-host)/i,
-  "public interface has an unexpected remote dependency");
+const externalUrls = [...(index + launch + cachePage).matchAll(/(?:src|href)=["'](https?:\/\/[^"']+)/gi)]
+  .map((match) => match[1])
+  .sort();
+assert.deepEqual(externalUrls, [
+  "https://discord.gg/gvd6nz8kQ4",
+  "https://github.com/KTMWILSON23/afterglow-goldhen-host",
+  "https://youtube.com/@XXFWilson23",
+]);
+assert.match(index, /class="social-icon youtube"/);
+assert.match(index, /class="social-icon discord"/);
+assert.match(index, /aria-label="Open XXFWilson23 on YouTube"/);
+assert.match(index, /aria-label="Join the XXFWilson23 Discord"/);
 assert.match(index, /PlayStation 4/);
 assert.match(index, /location\.replace\("\.\/cache\.html"\)/);
 assert.doesNotMatch(index, /<html[^>]+manifest=/i, "landing page must not start an AppCache update itself");
@@ -91,7 +101,7 @@ assert.doesNotMatch(cachePage, /<script[^>]+src=|<iframe|chain\//i,
   "cache installer must not import exploit code");
 
 assert.match(cacheManifest, /^CACHE MANIFEST\n/);
-assert.match(cacheManifest, /# XXFWilson23 offline cache 2026-11-14\.2/);
+assert.match(cacheManifest, /# XXFWilson23 offline cache 2026-11-14\.3/);
 const cacheBlock = /\nCACHE:\n([\s\S]*?)\nNETWORK:\n\*\s*$/.exec(cacheManifest);
 assert.ok(cacheBlock, "cache manifest must contain CACHE and NETWORK sections");
 assert.deepEqual(cacheBlock[1].trim().split("\n"), [

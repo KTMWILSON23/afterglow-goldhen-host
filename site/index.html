@@ -247,6 +247,50 @@
     footer a { color: #8792aa; text-decoration: none; }
     footer a:focus, footer a:hover { color: var(--cyan); }
 
+    .footer-actions,
+    .social-links {
+      display: flex;
+      align-items: center;
+    }
+
+    .footer-actions { gap: 18px; }
+    .social-links { gap: 9px; }
+
+    .social-icon {
+      width: 42px;
+      height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: rgba(17,23,38,.78);
+      color: #a8b2c8;
+      transition: color .16s ease, background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+
+    .social-icon svg { width: 23px; height: 23px; }
+
+    .social-icon:focus,
+    .social-icon:hover {
+      color: #fff;
+      outline: 2px solid rgba(255,255,255,.76);
+      outline-offset: 3px;
+      transform: translateY(-2px);
+    }
+
+    .social-icon.youtube:focus,
+    .social-icon.youtube:hover {
+      border-color: #ff3158;
+      background: #e9163d;
+    }
+
+    .social-icon.discord:focus,
+    .social-icon.discord:hover {
+      border-color: #8791ff;
+      background: #5865f2;
+    }
+
     @media (max-width: 820px) {
       .shell { width: min(100% - 36px, 700px); }
       header { min-height: 92px; }
@@ -259,7 +303,8 @@
       .brand { font-size: 17px; }
       .firmware { display: none; }
       .launch { width: 100%; min-width: 0; }
-      footer { align-items: flex-start; flex-direction: column; justify-content: center; }
+      footer { align-items: flex-start; flex-direction: column; justify-content: center; padding: 16px 0; }
+      .footer-actions { width: 100%; justify-content: space-between; }
     }
   </style>
 </head>
@@ -291,7 +336,25 @@
 
     <footer>
       <span>XXFWilson23 // 14.02 launch system</span>
-      <a href="https://github.com/KTMWILSON23/afterglow-goldhen-host">Source &amp; licence</a>
+      <div class="footer-actions">
+        <nav class="social-links" aria-label="XXFWilson23 social links">
+          <a class="social-icon youtube" href="https://youtube.com/@XXFWilson23" aria-label="Open XXFWilson23 on YouTube" title="YouTube">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <rect x="2" y="5" width="20" height="14" rx="4" fill="currentColor"></rect>
+              <path d="M10 8.5 16 12l-6 3.5z" fill="#070a12"></path>
+            </svg>
+          </a>
+          <a class="social-icon discord" href="https://discord.gg/gvd6nz8kQ4" aria-label="Join the XXFWilson23 Discord" title="Discord">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M5 4h14a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3H5a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor"></path>
+              <circle cx="8.5" cy="10.5" r="1.25" fill="#070a12"></circle>
+              <circle cx="15.5" cy="10.5" r="1.25" fill="#070a12"></circle>
+              <path d="M8 14c2.3 1.35 5.7 1.35 8 0" fill="none" stroke="#070a12" stroke-width="1.5" stroke-linecap="round"></path>
+            </svg>
+          </a>
+        </nav>
+        <a href="https://github.com/KTMWILSON23/afterglow-goldhen-host">Source &amp; licence</a>
+      </div>
     </footer>
   </div>
 
