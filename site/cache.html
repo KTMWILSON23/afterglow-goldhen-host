@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en" manifest="./cache.manifest">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070a12">
+  <title>XXFWilson23 // Offline cache</title>
+  <style>
+    :root {
+      --ink: #f4f7ff;
+      --muted: #96a0b8;
+      --line: #27324b;
+      --violet: #9b7bff;
+      --cyan: #49e6d2;
+      --amber: #ffca66;
+      --red: #ff6f85;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 78% 18%, rgba(155,123,255,.16), transparent 30rem),
+        radial-gradient(circle at 14% 88%, rgba(73,230,210,.09), transparent 28rem),
+        #070a12;
+      font-family: "Trebuchet MS", Arial, sans-serif;
+    }
+
+    .shell {
+      width: min(920px, calc(100% - 48px));
+      min-height: 100vh;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      min-height: 104px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: .08em;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      font: 700 12px/1 Consolas, monospace;
+      transform: rotate(45deg);
+    }
+
+    .mark span { transform: rotate(-45deg); }
+
+    .firmware {
+      color: var(--muted);
+      font: 11px/1 Consolas, monospace;
+      letter-spacing: .14em;
+    }
+
+    main {
+      flex: 1;
+      display: grid;
+      place-items: center;
+      padding: 64px 0;
+    }
+
+    .cache-card {
+      width: 100%;
+      padding: 44px;
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(18,24,40,.98), rgba(9,13,22,.94));
+      box-shadow: 0 28px 80px rgba(0,0,0,.34);
+    }
+
+    .eyebrow {
+      margin: 0 0 16px;
+      color: var(--cyan);
+      font: 700 11px/1 Consolas, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(38px, 7vw, 68px);
+      line-height: .98;
+      letter-spacing: -.045em;
+      text-transform: uppercase;
+    }
+
+    .summary {
+      max-width: 650px;
+      margin: 22px 0 34px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    .track {
+      height: 12px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: #080c14;
+    }
+
+    .fill {
+      width: 4%;
+      height: 100%;
+      background: linear-gradient(90deg, var(--violet), var(--cyan));
+      box-shadow: 0 0 24px rgba(73,230,210,.28);
+      transition: width .2s linear;
+    }
+
+    .status-row {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      color: var(--muted);
+      font: 12px/1.4 Consolas, monospace;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+
+    #cacheStatus { color: var(--amber); }
+    body.ready #cacheStatus { color: var(--cyan); }
+    body.error #cacheStatus { color: var(--red); }
+
+    .detail {
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: #68738c;
+      font: 11px/1.55 Consolas, monospace;
+    }
+
+    footer {
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--line);
+      color: #657089;
+      font: 10px/1 Consolas, monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    @media (max-width: 600px) {
+      .shell { width: min(100% - 28px, 520px); }
+      .cache-card { padding: 28px 22px; }
+      .firmware { display: none; }
+      .status-row { align-items: flex-start; flex-direction: column; padding: 14px 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand"><div class="mark"><span>XW</span></div>XXFWilson23</div>
+      <div class="firmware">PS4 // FW 14.02</div>
+    </header>
+
+    <main>
+      <section class="cache-card">
+        <p class="eyebrow">One-time setup</p>
+        <h1>Building offline cache</h1>
+        <p class="summary">Saving the complete 14.02 launch chain and GoldHEN payload to this browser. The launcher will open when the cache is ready.</p>
+        <div class="track" role="progressbar" aria-label="Offline cache progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="4" id="progressTrack">
+          <div class="fill" id="progressFill"></div>
+        </div>
+        <div class="status-row"><span id="cacheStatus">Preparing cache</span><span id="cacheCount">0 / 12 assets</span></div>
+        <div class="detail">No exploit runs on this page. After caching completes, launching GoldHEN still requires a separate button press.</div>
+      </section>
+    </main>
+
+    <footer><span>XXFWilson23 // Offline system</span><span>Version 2026-11-14.2</span></footer>
+  </div>
+
+  <script>
+    (function () {
+      var appCache = window.applicationCache;
+      var status = document.getElementById("cacheStatus");
+      var count = document.getElementById("cacheCount");
+      var fill = document.getElementById("progressFill");
+      var track = document.getElementById("progressTrack");
+      var finished = false;
+
+      sessionStorage.setItem("xxf_cache_attempted", "1");
+
+      function setProgress(percent) {
+        percent = Math.max(4, Math.min(100, percent || 0));
+        fill.style.width = percent + "%";
+        track.setAttribute("aria-valuenow", String(percent));
+      }
+
+      function returnToLauncher(message, ready, delay) {
+        if (finished) return;
+        finished = true;
+        status.textContent = message;
+        document.body.classList.add(ready ? "ready" : "error");
+        if (ready) {
+          sessionStorage.setItem("xxf_cache_ready", "1");
+          setProgress(100);
+          count.textContent = "12 / 12 assets";
+        }
+        window.setTimeout(function () {
+          window.location.replace("./index.html");
+        }, delay || 900);
+      }
+
+      if (!appCache) {
+        returnToLauncher("Online mode", false, 1200);
+        return;
+      }
+
+      appCache.addEventListener("checking", function () {
+        status.textContent = "Checking local cache";
+      }, false);
+
+      appCache.addEventListener("downloading", function () {
+        status.textContent = "Caching launch files";
+      }, false);
+
+      appCache.addEventListener("progress", function (event) {
+        var loaded = Number(event.loaded || 0);
+        var total = Number(event.total || 12);
+        var percent = total > 0 ? Math.round((loaded / total) * 100) : 4;
+        setProgress(percent);
+        count.textContent = loaded + " / " + total + " assets";
+      }, false);
+
+      appCache.addEventListener("cached", function () {
+        returnToLauncher("Offline cache ready", true, 850);
+      }, false);
+
+      appCache.addEventListener("noupdate", function () {
+        returnToLauncher("Offline cache already ready", true, 600);
+      }, false);
+
+      appCache.addEventListener("updateready", function () {
+        try { appCache.swapCache(); } catch (error) {}
+        returnToLauncher("Offline cache updated", true, 850);
+      }, false);
+
+      appCache.addEventListener("obsolete", function () {
+        returnToLauncher("Online mode", false, 1400);
+      }, false);
+
+      appCache.addEventListener("error", function () {
+        returnToLauncher("Cache unavailable — continuing online", false, 1800);
+      }, false);
+
+      window.setTimeout(function () {
+        try {
+          if (appCache.status === appCache.CHECKING || appCache.status === appCache.DOWNLOADING) {
+            appCache.abort();
+          }
+        } catch (error) {}
+        returnToLauncher("Cache timed out — continuing online", false, 1200);
+      }, 45000);
+    }());
+  </script>
+</body>
+</html>

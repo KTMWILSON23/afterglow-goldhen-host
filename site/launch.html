@@ -301,6 +301,61 @@
       observer.observe(log, { childList: true, characterData: true, subtree: true });
     }());
   </script>
-  <script type="module" src="./chain/jb.js"></script>
+  <script>
+    (function () {
+      var appCache = window.applicationCache;
+      var started = false;
+      var fallback = null;
+
+      function cacheBusy() {
+        return appCache &&
+          (appCache.status === appCache.CHECKING || appCache.status === appCache.DOWNLOADING);
+      }
+
+      function startChain() {
+        if (started) return;
+        started = true;
+        if (fallback) window.clearTimeout(fallback);
+        import("./chain/jb.js").catch(function (error) {
+          var log = document.getElementById("console");
+          var state = document.getElementById("state");
+          document.body.classList.add("failed");
+          state.textContent = "Launch stopped";
+          log.textContent += "MODULE-FAIL " + (error && error.message ? error.message : String(error)) + "\n";
+        });
+      }
+
+      function abortCacheAndStart() {
+        if (cacheBusy()) {
+          try { appCache.abort(); } catch (error) {}
+          window.setTimeout(abortCacheAndStart, 50);
+          return;
+        }
+        startChain();
+      }
+
+      function stopBackgroundUpdate() {
+        if (cacheBusy()) {
+          try { appCache.abort(); } catch (error) {}
+        }
+        if (!started) window.setTimeout(abortCacheAndStart, 0);
+      }
+
+      if (!appCache) {
+        startChain();
+        return;
+      }
+
+      appCache.addEventListener("checking", stopBackgroundUpdate, false);
+      appCache.addEventListener("downloading", stopBackgroundUpdate, false);
+      appCache.addEventListener("cached", abortCacheAndStart, false);
+      appCache.addEventListener("noupdate", abortCacheAndStart, false);
+      appCache.addEventListener("updateready", abortCacheAndStart, false);
+      appCache.addEventListener("obsolete", abortCacheAndStart, false);
+      appCache.addEventListener("error", abortCacheAndStart, false);
+
+      fallback = window.setTimeout(abortCacheAndStart, 1500);
+    }());
+  </script>
 </body>
 </html>

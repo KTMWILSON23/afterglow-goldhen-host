@@ -222,6 +222,14 @@
     }
 
     .spec .online { color: var(--cyan); }
+    .spec .working { color: var(--amber); }
+    .spec .online-only { color: var(--muted); }
+
+    .launch:disabled {
+      opacity: .58;
+      cursor: wait;
+      box-shadow: none;
+    }
 
     footer {
       min-height: 76px;
@@ -276,6 +284,7 @@
         <div class="spec"><span>Firmware</span><b>14.02</b></div>
         <div class="spec"><span>Payload</span><b>v2.4b18.14</b></div>
         <div class="spec"><span>Mode</span><b>Local / Static</b></div>
+        <div class="spec"><span>Offline cache</span><b class="working" id="cacheState">Checking</b></div>
         <div class="spec"><span>Host state</span><b class="online">Ready</b></div>
       </aside>
     </main>
@@ -289,6 +298,81 @@
   <script>
     (function () {
       var button = document.getElementById("launch");
+      var cacheState = document.getElementById("cacheState");
+      var appCache = window.applicationCache;
+      var isPS4 = /PlayStation 4/i.test(navigator.userAgent || "");
+      var cacheAttempted = sessionStorage.getItem("xxf_cache_attempted") === "1";
+      var cacheReady = sessionStorage.getItem("xxf_cache_ready") === "1";
+      var cacheWait = null;
+
+      function setCacheState(text, className, allowLaunch) {
+        cacheState.textContent = text;
+        cacheState.className = className;
+        button.disabled = !allowLaunch;
+        if (cacheWait) {
+          window.clearTimeout(cacheWait);
+          cacheWait = null;
+        }
+      }
+
+      function cacheWorking(text) {
+        cacheState.textContent = text;
+        cacheState.className = "working";
+        button.disabled = true;
+        if (!cacheWait) {
+          cacheWait = window.setTimeout(function () {
+            try {
+              if (appCache && (appCache.status === appCache.CHECKING || appCache.status === appCache.DOWNLOADING)) {
+                appCache.abort();
+              }
+            } catch (error) {}
+            setCacheState("Online launch", "online-only", true);
+          }, 45000);
+        }
+      }
+
+      if (appCache) {
+        appCache.addEventListener("checking", function () { cacheWorking("Checking"); }, false);
+        appCache.addEventListener("downloading", function () { cacheWorking("Updating"); }, false);
+        appCache.addEventListener("progress", function (event) {
+          var loaded = Number(event.loaded || 0);
+          var total = Number(event.total || 0);
+          cacheWorking(total > 0 ? "Updating " + Math.round((loaded / total) * 100) + "%" : "Updating");
+        }, false);
+        appCache.addEventListener("cached", function () {
+          sessionStorage.setItem("xxf_cache_ready", "1");
+          setCacheState("Offline ready", "online", true);
+        }, false);
+        appCache.addEventListener("noupdate", function () {
+          sessionStorage.setItem("xxf_cache_ready", "1");
+          setCacheState("Offline ready", "online", true);
+        }, false);
+        appCache.addEventListener("updateready", function () {
+          try { appCache.swapCache(); } catch (error) {}
+          sessionStorage.setItem("xxf_cache_ready", "1");
+          setCacheState("Offline updated", "online", true);
+        }, false);
+        appCache.addEventListener("error", function () {
+          setCacheState("Online launch", "online-only", true);
+        }, false);
+        appCache.addEventListener("obsolete", function () {
+          setCacheState("Online launch", "online-only", true);
+        }, false);
+      }
+
+      if (appCache && (appCache.status === appCache.CHECKING || appCache.status === appCache.DOWNLOADING)) {
+        cacheWorking(appCache.status === appCache.DOWNLOADING ? "Updating" : "Checking");
+      } else if (cacheReady || (appCache && appCache.status === appCache.IDLE)) {
+        setCacheState("Offline ready", "online", true);
+      } else if (isPS4 && appCache && appCache.status === appCache.UNCACHED && !cacheAttempted) {
+        sessionStorage.setItem("xxf_cache_attempted", "1");
+        cacheWorking("Preparing");
+        window.location.replace("./cache.html");
+        return;
+      } else {
+        setCacheState(isPS4 ? "Online launch" : "Browser preview", "online-only", true);
+      }
+
       button.addEventListener("click", function () {
         button.disabled = true;
         button.textContent = "Starting...";

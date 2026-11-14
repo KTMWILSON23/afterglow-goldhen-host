@@ -4,16 +4,19 @@ This repository publishes the minimal **XXFWilson23** launch host at:
 
 <https://ktmwilson23.github.io/afterglow-goldhen-host/>
 
-The public site contains one original interface, one launch page, the six
-unchanged modules needed by the proven 14.02 chain, and the untouched
-GoldHEN v2.4b18.14 payload. It has no payload catalogue, language pack,
-theme bundle, analytics, remote dependency, or unrelated exploit files.
+The public site contains one original interface, a dedicated offline-cache
+installer, one launch page, the six unchanged modules needed by the proven
+14.02 chain, and the untouched GoldHEN v2.4b18.14 payload. It has no payload
+catalogue, language pack, theme bundle, analytics, remote dependency, or
+unrelated exploit files.
 
 ## Public file set
 
 ```text
 site/
   index.html
+  cache.html
+  cache.manifest
   launch.html
   goldhen.bin
   chain/
@@ -25,6 +28,11 @@ site/
     afterglow.js
 ```
 
+On a PS4, the first online visit opens the branded cache installer. It saves
+all twelve runtime requests as one atomic Application Cache, then returns to
+the launcher. The exploit page never installs, updates, swaps, or reloads the
+cache. A separate button press is still required to launch GoldHEN.
+
 `goldhen.bin` is 298,776 bytes with SHA-256:
 
 ```text
@@ -32,7 +40,8 @@ c5480587d99efc2e3cc132352d9b7cf052dd3068280f1686e7fbb37d57e9ba8b
 ```
 
 The GitHub Actions deployment refuses to publish if any public file is added,
-removed, or changed unexpectedly.
+removed, or changed unexpectedly, or if the cache manifest omits a runtime
+asset or the exact query-string launch URL.
 
 ## Provenance
 
